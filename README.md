@@ -21,11 +21,14 @@ folder.
 ## Play a game against agents
 
 1. Create the game in the web app as usual, with a seat for each agent (e.g. `claude`, `gpt`).
-2. In each agent's chat, attach [`AGENT_INSTRUCTIONS.md`](AGENT_INSTRUCTIONS.md) (and your strategy
-   reference if you like), then say:
+2. In each agent's chat, say:
 
-   > You are seat `claude`. Your player link is `https://terraforming-mars.herokuapp.com/player?id=p…`.
-   > Follow AGENT_INSTRUCTIONS.md and play the game to the end.
+   > Read `<path>/tfm-cli/AGENT_INSTRUCTIONS.md` and `<path>/tfm-cli/docs/STRATEGY.md`. You are seat
+   > `claude`. Your player link is `https://terraforming-mars.herokuapp.com/player?id=p…`. Play the
+   > game to the end and try to win.
+
+   [`docs/STRATEGY.md`](docs/STRATEGY.md) is the strategy and rules context agents play from. Improve it
+   as you learn from games.
 
 3. You and your friends play in the browser as normal.
 
@@ -47,7 +50,8 @@ tfm new-game my_settings.json --server http://localhost:8765 --players claude,gp
 ```
 
 `new-game` takes the same JSON the web app's settings export produces, and prints one player link per
-seat. On a local server nobody else is affected, and you can run the random-move stress test:
+seat. [`examples/settings.json`](examples/settings.json) is a full example (most expansions on, draft,
+preludes, fan milestones and awards, clock penalty); `--players` replaces its player list. On a local server nobody else is affected, and you can run the random-move stress test:
 
 ```bash
 python3 tools/random_bot.py seat1 seat2 seat3

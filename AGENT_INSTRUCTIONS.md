@@ -77,7 +77,11 @@ ask them. Rerun the same command with `--yes` **only after they agree**.
 
 Use only your own player link. Never fetch another player's link or read their hidden hand.
 
-## Strategy reminders
+## Strategy
+
+Read [docs/STRATEGY.md](docs/STRATEGY.md) once at the start of the game: it covers strategic
+direction, rules that commonly trip players up, the expansions, the endgame, and lessons from past
+games. The short version:
 
 - Count remaining generations from how fast **all** players can finish the global parameters
   (temperature +8°C, oxygen 14%, 9 oceans). Engines that pay back after the game ends are worth nothing.
@@ -85,4 +89,4 @@ Use only your own player link. Never fetch another player's link or read their h
 - Before funding an award, project rivals' final scores, not just today's.
 - Value heat at zero once temperature is maxed, unless a card gives it another use.
 - Before passing, look for leftover greeneries, milestones, awards, card actions and trades.
-- If your human gave you a strategy document, follow it.
+- If your human gave you their own strategy notes, they take precedence over docs/STRATEGY.md.
