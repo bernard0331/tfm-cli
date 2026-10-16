@@ -1,0 +1,306 @@
+"""tfm: play Terraforming Mars (terraforming-mars.herokuapp.com or a local server) from a terminal.
+
+Built so that AI agents with shell access can play a seat with few tokens:
+    tfm join <player-link>    remember the seat
+    tfm turn                  wait for your turn, then print the state and numbered choices
+    tfm play <id> [value...]  submit a choice
+"""
+import argparse
+import json
+import sys
+import time
+from pathlib import Path
+
+from . import data, digest, options, seats
+from .client import DEFAULT_SERVER, Client, TfmError, create_game, parse_link
+from .text import card_line, message
+
+POLL_SECONDS = 3
+
+
+def _client(seat):
+    return Client(seat["server"], seat["player_id"])
+
+
+def _new_logs(client, seat, view):
+    """Log entries this seat has not printed yet (current and any skipped generations)."""
+    gen = view["game"]["generation"]
+    last_gen = seat.get("last_gen") or gen
+    entries = []
+    for g in range(max(1, min(last_gen, gen), gen - 2), gen + 1):
+        entries.extend(client.logs(g) or [])
+    last_ts = seat.get("last_log_ts", 0)
+    fresh = [e for e in entries if e.get("timestamp", 0) > last_ts]
+    if entries:
+        seat["last_log_ts"] = max(last_ts, max(e.get("timestamp", 0) for e in entries))
+    seat["last_gen"] = gen
+    return fresh
+
+
+def _print_options(view, ctx, seat):
+    wf = view.get("waitingFor")
+    if wf is None:
+        print("No decision pending for you right now. Run `tfm turn` to wait for one.")
+        seat.pop("fp", None)
+        return
+    leaves = options.leaves(wf, ctx)
+    title = options._title(wf, ctx)
+    print(f"YOUR DECISION: {title}")
+    for leaf in leaves:
+        label = leaf.label[len(title) + 3:] if leaf.label.startswith(title + " › ") else leaf.label
+        print(f"  [{leaf.id}] {label}" + (f"  ⟨{leaf.hint}⟩" if leaf.hint else ""))
+    print("Reply with: tfm play <id> [value ...]   (quote values containing spaces)")
+    seat["fp"] = options.fingerprint(wf)
+
+
+
+def _finish(seat, ctx):
+    seat["seen"] = sorted(ctx.seen)
+    seats.save(seat)
+
+
+def _show(view, seat, client, full, with_state=True):
+    ctx = options.Context(view, set(seat.get("seen", [])), full)
+    if view["game"]["phase"] == "end":
+        print("\n".join(digest.final_scores(view)))
+        _finish(seat, ctx)
+        return
+    logs = _new_logs(client, seat, view)
+    if with_state:
+        print("\n".join(digest.summarize(view, ctx, logs)))
+        print()
+    _print_options(view, ctx, seat)
+    _finish(seat, ctx)
+
+
+def cmd_join(args):
+    server, pid = parse_link(args.link, args.server)
+    client = Client(server, pid)
+    view = client.player()
+    name = seats.slug(args.name or view["thisPlayer"]["name"])
+    seat = {}
+    if name in seats.names():
+        seat = seats.load(name)
+        if seat.get("player_id") != pid:
+            seat = {}  # same seat name, different game: start fresh
+    seat.update({"name": name, "server": server, "player_id": pid, "mode": "confirm" if args.confirm else "auto",
+                 "color": view["thisPlayer"]["color"], "game": view["game"]["name"]})
+    seats.save(seat)
+    others = ", ".join(p["name"] for p in view["players"] if p["color"] != view["thisPlayer"]["color"])
+    print(f"Joined game '{view['game']['name']}' as {view['thisPlayer']['name']} ({view['thisPlayer']['color']}), "
+          f"seat name '{name}', mode {seat['mode']}. Opponents: {others}.")
+    if len(seats.names()) > 1:
+        print(f"Several seats are saved on this machine; pass --seat {name} (or set TFM_SEAT={name}) on every command.")
+
+
+def cmd_seats(_args):
+    for name in seats.names():
+        s = seats.load(name)
+        print(f"{name}: game {s.get('game')} · {s['server']} · player {s['player_id']} · mode {s.get('mode', 'auto')}")
+
+
+def cmd_leave(args):
+    seats.remove(args.name)
+    print(f"Removed seat {args.name}.")
+
+
+def cmd_turn(args):
+    seat = seats.load(args.seat)
+    client = _client(seat)
+    deadline = time.time() + args.wait
+    view = client.player()
+    while True:
+        if view["game"]["phase"] == "end":
+            break
+        wf = view.get("waitingFor")
+        if wf is not None and not wf.get("optional"):
+            break
+        if time.time() >= deadline:
+            status = client.waiting_for(view["game"]["gameAge"], view["game"]["undoCount"])
+            names = {p["color"]: p["name"] for p in view["players"]}
+            who = ", ".join(names.get(c, c) for c in status.get("waitingFor", [])) or "nobody (between phases)"
+            print(f"STILL WAITING: not your turn yet (waiting on: {who}). Run `tfm turn` again.")
+            return
+        status = client.waiting_for(view["game"]["gameAge"], view["game"]["undoCount"])
+        if status["result"] in ("GO", "REFRESH"):
+            view = client.player()
+            if status["result"] == "GO":
+                continue
+        time.sleep(POLL_SECONDS)
+    _show(view, seat, client, args.full)
+
+
+def cmd_state(args):
+    seat = seats.load(args.seat)
+    client = _client(seat)
+    _show(client.player(), seat, client, args.full)
+
+
+def cmd_options(args):
+    seat = seats.load(args.seat)
+    view = _client(seat).player()
+    ctx = options.Context(view, set(seat.get("seen", [])), args.full)
+    _print_options(view, ctx, seat)
+    _finish(seat, ctx)
+
+
+def cmd_play(args):
+    seat = seats.load(args.seat)
+    client = _client(seat)
+    view = client.player()
+    wf = view.get("waitingFor")
+    ctx = options.Context(view, set(seat.get("seen", [])), False)
+    if wf is None:
+        raise TfmError("no decision is pending for you; run `tfm turn`")
+    if seat.get("fp") != options.fingerprint(wf):
+        print("The choices changed since you last listed them, so nothing was submitted. Current choices:")
+        _print_options(view, ctx, seat)
+        _finish(seat, ctx)
+        sys.exit(2)
+    leaf = options.find_leaf(options.leaves(wf, ctx), args.choice)
+    response = options.build_response(leaf, args.values, ctx)
+    if seat.get("mode") == "confirm" and not args.yes:
+        print(f"CONFIRM MODE: proposed move [{leaf.id}] {leaf.label}")
+        if args.values:
+            print(f"  values: {args.values}")
+        print("Ask the human to approve; once they say yes, rerun the same command with --yes.")
+        sys.exit(3)
+    try:
+        new_view = client.submit(response, view.get("runId"))
+    except TfmError as e:
+        print(f"REJECTED: {e}")
+        _print_options(client.player(), ctx, seat)
+        _finish(seat, ctx)
+        sys.exit(1)
+    print(f"OK: [{leaf.id}] {leaf.label}" + (f" {args.values}" if args.values else ""))
+    if args.debug:
+        print(json.dumps(response))
+    for entry in _new_logs(client, seat, new_view):
+        print("  " + message(entry, ctx.names))
+    me = new_view["thisPlayer"]
+    print(f"NOW: {digest.resources(me)} · TR {me['terraformRating']} · hand {len(new_view.get('cardsInHand', []))}")
+    ctx = options.Context(new_view, ctx.seen, False)
+    wf = new_view.get("waitingFor")
+    if new_view["game"]["phase"] == "end":
+        print("\n".join(digest.final_scores(new_view)))
+    elif wf is not None and not wf.get("optional"):
+        _print_options(new_view, ctx, seat)
+    else:
+        seat.pop("fp", None)
+        print("Your turn is done. Run `tfm turn` to wait for your next decision.")
+    _finish(seat, ctx)
+
+
+def cmd_card(args):
+    for name in args.names:
+        info = data.card(name)
+        if info is None:
+            hits = [n for n in data.cards() if name.lower() in n.lower()][:10]
+            print(f"{name}: not found" + (f" (did you mean: {', '.join(hits)})" if hits else ""))
+            continue
+        print(f"{card_line(data.card_name(name))} [{info['type']}, {info.get('module')}]")
+
+
+def cmd_board(args):
+    seat = seats.load(args.seat)
+    view = _client(seat).player()
+    names = {p["color"]: p["name"] for p in view["players"]}
+    me = view["thisPlayer"]["color"]
+    rows = {}
+    for s in view["game"]["spaces"]:
+        if s.get("tileType") is None:
+            continue
+        owner = "YOU" if s.get("color") == me else names.get(s.get("color"), "neutral" if s.get("color") else "-")
+        rows.setdefault(owner, []).append(f"{s['id']}{'[' + s['a9'] + ']' if s.get('a9') else ''} {data.tile_name(s['tileType'])}")
+    for owner, tiles in rows.items():
+        print(f"{owner}: " + "; ".join(tiles))
+    free = [s["id"] for s in view["game"]["spaces"] if s.get("tileType") is None and s["spaceType"] == "land"]
+    print(f"empty land spaces: {len(free)}")
+
+
+def cmd_log(args):
+    seat = seats.load(args.seat)
+    client = _client(seat)
+    view = client.player()
+    names = {p["color"]: p["name"] for p in view["players"]}
+    for entry in client.logs(args.generation or view["game"]["generation"]):
+        print(message(entry, names))
+
+
+def cmd_new_game(args):
+    settings = json.loads(Path(args.settings).read_text())
+    if args.players:
+        colors = ["red", "green", "yellow", "blue", "black", "purple", "orange", "pink"]
+        settings["players"] = [{"name": n.strip(), "color": colors[i], "beginner": False, "handicap": 0, "first": False}
+                               for i, n in enumerate(args.players.split(","))]
+    game = create_game(args.server, settings)
+    print(f"Created game {game['id']} ({game.get('name')}) on {args.server}")
+    for p in game["players"]:
+        print(f"  {p['name']}: {args.server.rstrip('/')}/player?id={p['id']}")
+    print(f"  spectator: {args.server.rstrip('/')}/spectator?id={game['spectatorId']}")
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="tfm", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("-s", "--seat", help="seat name (default: $TFM_SEAT or the only saved seat)")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("join", help="remember a seat from a player link")
+    p.add_argument("link")
+    p.add_argument("--as", dest="name", help="seat name (default: player name)")
+    p.add_argument("--server", help=f"server for a bare player id (default {DEFAULT_SERVER})")
+    p.add_argument("--confirm", action="store_true", help="require --yes on every play (human approves each move)")
+    p.set_defaults(fn=cmd_join)
+
+    sub.add_parser("seats", help="list saved seats").set_defaults(fn=cmd_seats)
+    p = sub.add_parser("leave", help="forget a seat")
+    p.add_argument("name")
+    p.set_defaults(fn=cmd_leave)
+
+    p = sub.add_parser("turn", help="wait for your turn, then print state and choices")
+    p.add_argument("--wait", type=int, default=100, help="seconds to wait before giving up (default 100)")
+    p.add_argument("--full", action="store_true", help="repeat card and milestone text already shown")
+    p.set_defaults(fn=cmd_turn)
+
+    p = sub.add_parser("state", help="print state and choices now, without waiting")
+    p.add_argument("--full", action="store_true")
+    p.set_defaults(fn=cmd_state)
+
+    p = sub.add_parser("options", help="print only the current choices")
+    p.add_argument("--full", action="store_true")
+    p.set_defaults(fn=cmd_options)
+
+    p = sub.add_parser("play", help="submit a choice: tfm play <id> [value ...]")
+    p.add_argument("choice")
+    p.add_argument("values", nargs="*")
+    p.add_argument("--yes", action="store_true", help="confirm a move in confirm mode")
+    p.add_argument("--debug", action="store_true", help="print the JSON sent to the server")
+    p.set_defaults(fn=cmd_play)
+
+    p = sub.add_parser("card", help="show card text")
+    p.add_argument("names", nargs="+")
+    p.set_defaults(fn=cmd_card)
+
+    sub.add_parser("board", help="list tiles on the board").set_defaults(fn=cmd_board)
+    p = sub.add_parser("log", help="print the game log for a generation")
+    p.add_argument("--generation", type=int)
+    p.set_defaults(fn=cmd_log)
+
+    p = sub.add_parser("new-game", help="create a game from a settings JSON and print player links")
+    p.add_argument("settings")
+    p.add_argument("--server", default=DEFAULT_SERVER)
+    p.add_argument("--players", help="comma-separated player names (overrides the settings file)")
+    p.set_defaults(fn=cmd_new_game)
+
+    args = parser.parse_args(argv)
+    try:
+        args.fn(args)
+    except TfmError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()

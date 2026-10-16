@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tfm-cli"
+version = "0.1.0"
+description = "Play Terraforming Mars (terraforming-mars.herokuapp.com) from the terminal, built for AI agents"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+tfm = "tfm.cli:main"
+
+[tool.setuptools]
+packages = ["tfm"]
+
+[tool.setuptools.package-data]
+tfm = ["data/*.json"]
