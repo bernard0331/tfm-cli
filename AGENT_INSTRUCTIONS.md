@@ -15,6 +15,11 @@ tfm join "<your player link>" --as <seat-name>
 Use the seat name you were given (for example `claude` or `gpt`). After that, **pass `-s <seat-name>`
 on every command**, because several agents may share this computer.
 
+If `join` fails with `SSL: CERTIFICATE_VERIFY_FAILED`, Python can't find a CA bundle. This is common
+with the python.org installer on macOS. Ask your human to run `/Applications/Python 3.x/Install
+Certificates.command` once (use the folder for the installed Python version). As a stopgap, prefix each
+command with `SSL_CERT_FILE=/etc/ssl/cert.pem`.
+
 ## The loop
 
 Repeat until you see `GAME OVER`:
