@@ -109,7 +109,7 @@ def awards(g, me, names, ctx):
     return lines
 
 
-def colonies(g, view, names):
+def colonies(g, view, names, ctx=None):
     active = [c for c in g["colonies"] if c.get("isActive", True)]
     if not active:
         return []
@@ -121,7 +121,8 @@ def colonies(g, view, names):
         pos = c.get("trackPosition", 0)
         now = qty[pos] if isinstance(qty, list) and pos < len(qty) else "?"
         owners = ", ".join(names.get(x, x) for x in c["colonies"]) or "-"
-        line = f"  {c['name']}: trade {info.get('trade', '?')} (n={now} now) · colonies {owners} ({len(c['colonies'])}/3)"
+        trade = info.get("trade", "?") if ctx is None or ctx.show_text("col:" + c["name"]) else "…"
+        line = f"  {c['name']}: trade {trade} (n={now} now) · colonies {owners} ({len(c['colonies'])}/3)"
         if c.get("visitor"):
             line += f" · fleet: {names.get(c['visitor'], c['visitor'])}"
         lines.append(line)
@@ -141,64 +142,148 @@ def tableau(p):
     return ", ".join(out) or "none"
 
 
-def summarize(view, ctx, new_logs):
+def sections(view, ctx, new_logs):
+    """The summary as ordered chunks (key, always, lines).
+
+    Chunks sharing a key form one section. Sections with always=True are printed on every turn;
+    the others can be left out of a turn when unchanged since the seat's last turn (see changes_only).
+    """
     g = view["game"]
     me = view["thisPlayer"]
     names = ctx.names
     opts = g["gameOptions"]
     out = []
-    out.append(f"GAME {g['name']} · generation {g['generation']} · phase {g['phase']} · map {opts['boardName']}"
-               f" · {len(view['players'])} players")
-    out.append("GLOBALS: " + globals_line(g))
+
+    def add(key, always, *lines):
+        out.append((key, always, list(lines)))
+
+    head = [f"GAME {g['name']} · generation {g['generation']} · phase {g['phase']} · map {opts['boardName']}"
+            f" · {len(view['players'])} players", "GLOBALS: " + globals_line(g)]
     if g.get("pathfinders"):
         tracks = ", ".join(f"{k} {v}" for k, v in g["pathfinders"].items() if v is not None and v >= 0)
-        out.append(f"PLANETARY TRACKS: {tracks}")
+        head.append(f"PLANETARY TRACKS: {tracks}")
+    add("game", True, *head)
     vp = me["victoryPointsBreakdown"]
-    out.append("")
-    out.append(f"YOU: {me['name']} ({me['color']}) · {corporation(me)} · TR {me['terraformRating']} · "
-               f"VP now {vp['total']} (TR {vp['terraformRating']}, milestones {vp['milestones']}, awards {vp['awards']}, "
-               f"greenery {vp['greenery']}, city {vp['city']}, cards {vp['victoryPoints']})")
-    out.append(f"  {resources(me)}  · steel={me['steelValue']} ti={me['titaniumValue']}")
-    out.append(f"  tags: {tags(me)}")
-    out.append(f"  tiles: {me['citiesCount']} cities · colonies {me['coloniesCount']} · "
-               f"corruption {me.get('underworldData', {}).get('corruption', 0)}")
-    out.append(f"  played: {tableau(me)}")
+    add("", True, "")
+    add("you", True,
+        f"YOU: {me['name']} ({me['color']}) · {corporation(me)} · TR {me['terraformRating']} · "
+        f"VP now {vp['total']} (TR {vp['terraformRating']}, milestones {vp['milestones']}, awards {vp['awards']}, "
+        f"greenery {vp['greenery']}, city {vp['city']}, cards {vp['victoryPoints']})",
+        f"  {resources(me)}  · steel={me['steelValue']} ti={me['titaniumValue']}")
+    add("you.tags", False, f"  tags: {tags(me)}")
+    add("you.tiles", False, f"  tiles: {me['citiesCount']} cities · colonies {me['coloniesCount']} · "
+                            f"corruption {me.get('underworldData', {}).get('corruption', 0)}")
+    add("you.played", False, f"  played: {tableau(me)}")
     if me["actionsThisGeneration"]:
-        out.append(f"  card actions used this generation: {', '.join(me['actionsThisGeneration'])}")
-    out.append(f"  {clock(me, opts)} · actions taken {me['actionsTakenThisGame']}")
+        add("you.actions", False, f"  card actions used this generation: {', '.join(me['actionsThisGeneration'])}")
+    add("you.clock", True, f"  {clock(me, opts)} · actions taken {me['actionsTakenThisGame']}")
     hand = view.get("cardsInHand", [])
-    out.append(f"  HAND ({len(hand)}):")
-    for c in hand:
-        out.append("    " + card_line(c, with_text=ctx.show_text(c["name"])))
+    add("hand", False, f"  HAND ({len(hand)}):",
+        *("    " + card_line(c, with_text=ctx.show_text(c["name"])) for c in hand))
     for label, key in (("PRELUDES IN HAND", "preludeCardsInHand"), ("DRAFTED", "draftedCards")):
         cards = view.get(key) or []
         if cards:
-            out.append(f"  {label}: " + "; ".join(card_line(c, with_text=ctx.show_text(c["name"])) for c in cards))
+            add(key, False, f"  {label}: " + "; ".join(card_line(c, with_text=ctx.show_text(c["name"])) for c in cards))
 
-    out.append("")
-    out.append("OPPONENTS:")
+    add("", True, "")
+    add("opps", True, "OPPONENTS:")
     passed = set(g.get("passedPlayers", []))
     for p in view["players"]:
         if p["color"] == me["color"]:
             continue
         flag = " PASSED" if p["color"] in passed else (" (acting)" if p.get("isActive") else "")
-        out.append(f"  {p['name']} ({p['color']}) · {corporation(p)} · TR {p['terraformRating']} · hand {p['cardsInHandNbr']}"
-                   f" · cities {p['citiesCount']} · colonies {p['coloniesCount']}{flag}")
-        out.append(f"    {resources(p)}")
-        out.append(f"    tags: {tags(p)}")
-        out.append(f"    played: {tableau(p)}")
+        add(f"opp.{p['name']}", True,
+            f"  {p['name']} ({p['color']}) · {corporation(p)} · TR {p['terraformRating']} · hand {p['cardsInHandNbr']}"
+            f" · cities {p['citiesCount']} · colonies {p['coloniesCount']}{flag}",
+            f"    {resources(p)}")
+        add(f"opp.{p['name']}.tags", False, f"    tags: {tags(p)}")
+        add(f"opp.{p['name']}.played", False, f"    played: {tableau(p)}")
 
-    out.append("")
-    out.extend(milestones(g, me, names, ctx))
-    out.extend(awards(g, me, names, ctx))
-    out.extend(colonies(g, view, names))
+    add("", True, "")
+    add("milestones", False, *milestones(g, me, names, ctx))
+    add("awards", False, *awards(g, me, names, ctx))
+    col = colonies(g, view, names, ctx if ONCE_COLONY_TEXT else None)
+    if col:
+        add("colonies", False, *col)
 
     if new_logs:
-        out.append("")
-        out.append("SINCE YOUR LAST LOOK:")
-        for entry in new_logs[-60:]:
-            out.append("  " + message(entry, names))
+        add("log", True, "", "SINCE YOUR LAST LOOK:", *("  " + message(entry, names) for entry in new_logs[-60:]))
     return out
+
+
+SECTION_NAMES = {"you.tags": "your tags", "you.tiles": "your tiles", "you.played": "your played cards",
+                 "you.actions": "your card actions used", "hand": "your hand",
+                 "preludeCardsInHand": "your preludes", "draftedCards": "your drafted cards"}
+
+
+ONCE_COLONY_TEXT = False  # print each colony's trade text only the first time, like card text
+
+
+def section_name(key):
+    if key.startswith("opp."):
+        _, rest = key.split(".", 1)
+        player, _, part = rest.rpartition(".")
+        return f"{player}'s {part}"
+    return SECTION_NAMES.get(key, key)
+
+
+def summarize(view, ctx, new_logs):
+    return [line for _key, _always, lines in sections(view, ctx, new_logs) for line in lines]
+
+
+def section_hashes(chunks):
+    import hashlib
+    texts = {}
+    for key, always, lines in chunks:
+        if not always:
+            texts[key] = texts.get(key, "") + "\n".join(lines) + "\n"
+    return {k: hashlib.sha1(v.encode()).hexdigest()[:10] for k, v in texts.items()}
+
+
+LINE_LEVEL = ("milestones", "awards", "colonies")
+
+
+def _line_key(line):
+    """The name a milestone/award/colony line is about (text before its description or colon)."""
+    return line.strip().split(" (")[0].split(":")[0].split(" [")[0]
+
+
+def changes_only(chunks, shown, by_line=False):
+    """Lines for a turn that repeats only what changed since `shown` (from the seat's last turn).
+
+    Sections are compared whole; with by_line, milestones, awards and colonies are compared line by line,
+    printing their header plus the changed lines.
+    """
+    import hashlib
+
+    def h(text):
+        return hashlib.sha1(text.encode()).hexdigest()[:10]
+
+    now = section_hashes(chunks)
+    if by_line:
+        for key, _always, lines in chunks:
+            if key in LINE_LEVEL:
+                for line in lines[1:]:
+                    now[f"{key}/{_line_key(line)}"] = h(line)
+    keep = {k for k, v in now.items() if shown.get(k) != v}
+    lines, skipped = [], []
+    for key, always, chunk in chunks:
+        if always or (key in keep and not (by_line and key in LINE_LEVEL)):
+            lines.extend(chunk)
+        elif by_line and key in LINE_LEVEL and key in keep:
+            changed = [ln for ln in chunk[1:] if f"{key}/{_line_key(ln)}" in keep]
+            omitted = len(chunk) - 1 - len(changed)
+            lines.append(chunk[0] + (f" (only changed lines; {omitted} unchanged not repeated)" if omitted else ""))
+            lines.extend(changed)
+        elif key not in skipped:
+            skipped.append(key)
+    if skipped:
+        note = "UNCHANGED since your last turn, so not repeated: " + ", ".join(section_name(k) for k in skipped)
+        idx = next((i for i, ln in enumerate(lines) if ln == "SINCE YOUR LAST LOOK:"), len(lines))
+        if idx > 0 and lines[idx - 1] == "":
+            idx -= 1
+        lines[idx:idx] = ["", note]
+    return lines, now
 
 
 def final_scores(view):
