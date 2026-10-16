@@ -11,7 +11,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import data, digest, options, seats
+from . import data, digest, options, seats, value
 from .client import DEFAULT_SERVER, Client, TfmError, create_game, parse_link
 from .text import card_line, message
 
@@ -59,7 +59,50 @@ def _finish(seat, ctx):
     seats.save(seat)
 
 
-def _show(view, seat, client, full, with_state=True):
+def _decision_cards(node, out):
+    """Card models offered in the pending decision (draft picks, buys, cards to play)."""
+    if isinstance(node, dict):
+        for c in node.get("cards") or []:
+            if isinstance(c, dict) and c.get("name"):
+                out.setdefault(c["name"], c)
+        for key in ("options", "andOptions"):
+            for child in node.get(key) or []:
+                _decision_cards(child, out)
+    return out
+
+
+def _print_values(view, names=None, gens=None):
+    ctx = value.Outlook(view, gens_left=gens)
+    print(ctx.summary())
+    buying_phase = view["game"]["phase"] in ("research", "drafting", "initial_drafting", "prelude_draft", "ceo_draft")
+    rows = []
+    if names:
+        hand = {c["name"]: c for c in view.get("cardsInHand", [])}
+        for n in names:
+            key = data.card_name(n)
+            if key is None:
+                print(f"{n}: not found")
+                continue
+            rows.append((key, hand.get(key), key not in hand, "named"))
+    else:
+        offered = _decision_cards(view.get("waitingFor"), {})
+        for name, model in offered.items():
+            rows.append((name, model, buying_phase, "buy" if buying_phase else "choice"))
+        for model in view.get("cardsInHand", []):
+            if model["name"] not in offered:
+                rows.append((model["name"], model, False, "hand"))
+        for model in (view.get("preludeCardsInHand") or []) + (view.get("draftedCards") or []):
+            if model["name"] not in offered:
+                rows.append((model["name"], model, model in (view.get("draftedCards") or []), "prelude" if model in (view.get("preludeCardsInHand") or []) else "drafted"))
+    if not rows:
+        print("No cards to value: name some, e.g. tfm value \"Kelp Farming\".")
+        return
+    results = [(value.value_card(name, ctx, buying=buying, model=model), where) for name, model, buying, where in rows]
+    for v, where in sorted(results, key=lambda r: -r[0].net):
+        print("\n".join(value.describe(v, where)))
+
+
+def _show(view, seat, client, full, with_state=True, with_values=False):
     ctx = options.Context(view, set(seat.get("seen", [])), full)
     if view["game"]["phase"] == "end":
         print("\n".join(digest.final_scores(view)))
@@ -70,6 +113,9 @@ def _show(view, seat, client, full, with_state=True):
         print("\n".join(digest.summarize(view, ctx, logs)))
         print()
     _print_options(view, ctx, seat)
+    if with_values:
+        print()
+        _print_values(view)
     _finish(seat, ctx)
 
 
@@ -127,13 +173,18 @@ def cmd_turn(args):
             if status["result"] == "GO":
                 continue
         time.sleep(POLL_SECONDS)
-    _show(view, seat, client, args.full)
+    _show(view, seat, client, args.full, with_values=args.value)
 
 
 def cmd_state(args):
     seat = seats.load(args.seat)
     client = _client(seat)
-    _show(client.player(), seat, client, args.full)
+    _show(client.player(), seat, client, args.full, with_values=args.value)
+
+
+def cmd_value(args):
+    seat = seats.load(args.seat)
+    _print_values(_client(seat).player(), args.names, args.gens)
 
 
 def cmd_options(args):
@@ -260,11 +311,18 @@ def main(argv=None):
     p = sub.add_parser("turn", help="wait for your turn, then print state and choices")
     p.add_argument("--wait", type=int, default=100, help="seconds to wait before giving up (default 100)")
     p.add_argument("--full", action="store_true", help="repeat card and milestone text already shown")
+    p.add_argument("--value", action="store_true", help="also print `tfm value` for the cards in the decision and hand")
     p.set_defaults(fn=cmd_turn)
 
     p = sub.add_parser("state", help="print state and choices now, without waiting")
     p.add_argument("--full", action="store_true")
+    p.add_argument("--value", action="store_true", help="also print `tfm value` for the cards in the decision and hand")
     p.set_defaults(fn=cmd_state)
+
+    p = sub.add_parser("value", help="estimate what cards are worth in M€ now, with context checks")
+    p.add_argument("names", nargs="*", help="cards to value (default: cards in the pending decision and your hand)")
+    p.add_argument("--gens", type=int, help="override the estimated generations left (including this one)")
+    p.set_defaults(fn=cmd_value)
 
     p = sub.add_parser("options", help="print only the current choices")
     p.add_argument("--full", action="store_true")

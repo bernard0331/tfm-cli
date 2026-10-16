@@ -67,6 +67,7 @@ python3 tools/random_bot.py seat1 seat2 seat3
 | `tfm -s NAME state` / `options` | Print state and choices / choices only, without waiting |
 | `tfm -s NAME board` / `log` | List tiles / this generation's log |
 | `tfm card NAME ...` | Card text from the bundled card data |
+| `tfm -s NAME value [CARD ...] [--gens N]` | Estimate what cards are worth in M€ now (default: the cards in your pending decision and hand), with context checks. `turn --value` / `state --value` append the same report |
 | `tfm seats` / `tfm leave NAME` | List / remove saved seats |
 | `tfm new-game SETTINGS.json --server URL [--players a,b]` | Create a game and print player links |
 
@@ -77,16 +78,46 @@ python3 tools/random_bot.py seat1 seat2 seat3
 - Payments are checked against your resources and the card's payment rules before they're sent.
 - On a server rejection, the reason and the current choices are printed.
 
+### `tfm value`
+
+`tfm value` prices each card's declared effects at fixed rates (1 VP = 5 M€, 1 TR = 8.5 M€, plus
+derived rates for heat, plants, metals and cards in [`docs/STRATEGY.md`](docs/STRATEGY.md) §6), with
+production counted only for the production phases the game is likely to have left. It prints the
+price (play cost, plus 3 M€ when you'd be buying the card), the estimated value, the net and the
+ratio, then context checks on the live game:
+
+- global-parameter bonus thresholds the card crosses (−24/−20°C heat production, 0°C ocean, 8% oxygen
+  temperature step, Venus 8% card and 16% TR, alternative Venus board rewards) and when it takes the
+  last step of a parameter or completes terraforming;
+- Pathfinders planetary-track rewards its tags trigger, for you and for every player;
+- milestones it would let you claim, and award placings it changes for you and each rival;
+- requirements it meets for cards in your hand, or requirements it doesn't meet yet;
+- rivals' cards that pay out when you do this, and who can block an attack;
+- Underworld digs: excavation is priced from the tokens still in the bag (or the best identified
+  token you can reach), identify-and-claim as the best of the identified tokens, and corruption by
+  whether it cancels your negative VP;
+- effects the numbers can't cover (custom card code, ongoing effects), marked `?` to read yourself.
+
+Standard projects and conversions (`tfm value Asteroid:SP Excavate:SP "Convert Heat"`) are priced the
+same way, so you can compare a card with the standard project it would replace.
+
+Generations left come from the table's recent terraforming pace, capped at a typical game length
+for the player count; override with `--gens`. The numbers are estimates for comparing options.
+
 ## Updating card data
 
-`tfm/data/` holds card text, milestone and award descriptions, colonies and board adjacency, exported
+`tfm/data/` holds card text and effects, milestone and award descriptions, colonies and board adjacency, exported
 from the app's source code. After a big app update, rebuild the data from a built checkout of the app:
 
 ```bash
-cp tools/tfm_cli_export.ts <app>/src/tools/
+cp tools/tfm_cli_export.ts tools/tfm_cli_cards_export.ts <app>/src/tools/
 (cd <app> && npx tsx src/tools/tfm_cli_export.ts /tmp/tfm_export.json)
-python3 tools/build_data.py <app> /tmp/tfm_export.json
+(cd <app> && npx tsx src/tools/tfm_cli_cards_export.ts /tmp/tfm_cards_export.json)
+python3 tools/build_data.py <app> /tmp/tfm_export.json /tmp/tfm_cards_export.json
 ```
+
+`behaviors.json` (each card's declared effects and the planetary tracks, used by `tfm value`) comes
+from the second export.
 
 ## Limits
 

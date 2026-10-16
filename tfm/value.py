@@ -1,0 +1,891 @@
+"""Rough card valuation for decision making: `tfm value`.
+
+Two layers:
+
+1. A **baseline number**. Every effect a card declares (production, resources, TR, global steps, tiles,
+   cards, VP) is priced in M€ at fixed exchange rates (1 VP = 5 M€, 1 TR = 8.5 M€, see
+   docs/STRATEGY.md §6), with production counted only for the production phases the game is likely to
+   have left. Compare it with what you pay (play cost, plus 3 M€ to buy a card you don't own yet).
+2. **Context checks** on the live game: global-parameter bonus thresholds the card would cross, the last
+   step of a parameter, Pathfinders planetary-track rewards its tags trigger (for you and for everyone),
+   milestones it would let you claim, award positions it changes for you and for rivals, requirements it
+   meets for cards in your hand, rivals' cards that pay out when you do this, and attacks a rival can block.
+
+The numbers are estimates for comparing options, not exact values. Effects the app implements with
+custom code are flagged so you read the card text yourself.
+"""
+import math
+import re
+
+from . import data
+
+VP, TR, CARD, BUY_COST = 5.0, 8.5, 3.5, 3
+CITY_TILE, SPECIAL_TILE, COLONY = 5.0, 2.0, 10.0
+OCEAN_ADJACENCY = 2.0   # typical ocean-adjacency income on top of the ocean's TR
+PLANETARY = ("venus", "earth", "mars", "jovian", "moon")
+
+# Underworld token bag (normal game, from the app's UnderworldExpansion.TOKEN_COUNTS).
+TOKEN_COUNTS = {
+    "nothing": 5, "corruption1": 13, "corruption2": 2, "card1": 4, "card2": 1, "mcprod1pertemp": 2,
+    "steel2plant": 2, "steel1production": 4, "steel2pertemp": 3, "titaniumandplant": 3, "titanium2": 3,
+    "titanium1production": 1, "titanium1pertemp": 3, "plant2": 4, "plant3": 1, "plant1production": 4,
+    "plant2pertemp": 3, "energy2": 2, "energy1production": 5, "heat2production": 3, "microbe2": 4,
+    "microbe2pertemp": 1, "tr": 2, "ocean": 2, "sciencetag": 2, "planttag": 2, "anyresource1": 2, "place6mc": 2,
+    "oceanrequirementmod": 2, "oxygenrequirementmod": 2, "temprequirementmod": 2,
+}
+
+# Standard projects and actions are implemented in code in the app, so their effects are spelled out here.
+STANDARD_BEHAVIORS = {
+    "Aquifer": {"ocean": {}},
+    "City": {"city": {}, "production": {"megacredits": 1}},
+    "Power Plant:SP": {"production": {"energy": 1}},
+    "Greenery": {"greenery": {}},
+    "Asteroid:SP": {"global": {"temperature": 1}},
+    "Air Scrapping": {"global": {"venus": 1}},
+    "Air Scrapping (Var)": {"global": {"venus": 1}},
+    "Build Colony": {"colonies": {"buildColony": {}}},
+    "Buffer Gas": {"tr": 1},
+    "Excavate:SP": {"underworld": {"excavate": 1}},
+    # Conversions spend plants/heat that have no better use, so only the gain is priced.
+    "Convert Plants": {"greenery": {}},
+    "Convert Heat": {"global": {"temperature": 1}},
+}
+
+# Well-known cards that pay their owner (or the acting player) when ANY player does something.
+ANY_PLAYER_TRIGGERS = {
+    "Aphrodite": ("venus", "its owner gains 2 M€ per Venus step"),
+    "Exploitation Of Venus": ("venus", "the player raising Venus gains 2 M€ per step"),
+    "Poseidon": ("colony", "its owner gains 1 M€ production per colony"),
+    "Botanical Experience": ("greenery", "its owner gains 1 data per greenery (3 data = +1 plant production)"),
+    "Tharsis Republic": ("city", "its owner gains 1 M€ production per city on Mars"),
+    "Rover Construction": ("city", "its owner gains 2 M€ per city"),
+    "Pets": ("city", "its owner adds an animal (1/2 VP) per city"),
+    "Immigrant City": ("city", "its owner gains 1 M€ production per city"),
+    "Arctic Algae": ("ocean", "its owner gains 2 plants per ocean"),
+    "Saturn Systems": ("jovian", "its owner gains 1 M€ production per Jovian tag"),
+    "Splice": ("microbe", "its owner gains 2 M€ per microbe tag"),
+}
+
+
+# --------------------------------------------------------------------------------------------- outlook
+
+class Outlook:
+    """What the current game state says about time left and what resources are worth."""
+
+    def __init__(self, view, gens_left=None):
+        g = view["game"]
+        self.view = view
+        self.game = g
+        self.me = view["thisPlayer"]
+        self.players = view["players"]
+        self.rivals = [p for p in self.players if p["color"] != self.me["color"]]
+        self.names = {p["color"]: p["name"] for p in self.players}
+        opts = g["gameOptions"]
+        self.expansions = opts.get("expansions", {})
+        self.alt_venus = bool(opts.get("altVenusBoard"))
+        self.venus_counts = bool(self.expansions.get("venus")) and bool(opts.get("requiresVenusTrackCompletion"))
+        self.generation = g["generation"]
+        self.temp, self.oxygen, self.oceans = g["temperature"], g["oxygenLevel"], g["oceans"]
+        self.venus = g.get("venusScaleLevel", 0) or 0
+        self.left = {
+            "temperature": max(0, (8 - self.temp) // 2),
+            "oxygen": max(0, 14 - self.oxygen),
+            "oceans": max(0, 9 - self.oceans),
+            "venus": max(0, (30 - self.venus) // 2) if self.expansions.get("venus") else 0,
+        }
+        remaining = self.left["temperature"] + self.left["oxygen"] + self.left["oceans"] + \
+            (self.left["venus"] if self.venus_counts else 0)
+        self.pace = self._pace(g.get("globalsPerGeneration") or [])
+        by_pace = 1 if remaining == 0 else max(1, math.ceil(remaining / self.pace))
+        # Early pace understates how fast tables finish (terraforming accelerates), so also cap the
+        # estimate at a typical game length for this player count and setup.
+        typical = {1: 14, 2: 12, 3: 11}.get(len(self.players), 10) - (1 if self.expansions.get("prelude") else 0)
+        by_length = max(1, typical - self.generation + 1)
+        self.gens_left = gens_left if gens_left is not None else min(by_pace, by_length)
+        self.by_pace, self.by_length = by_pace, by_length
+        # Production at the end of each remaining generation except the last can still be spent.
+        self.phases = max(0, self.gens_left - 1)
+        self.plant_phases = self.gens_left  # final plants still become a greenery
+        self.remaining_steps = remaining
+        self.heat = 1.0 if self.left["temperature"] else 0.0
+        self.plant = 1.7 if self.left["oxygen"] else 0.6
+        self.steel = float(self.me.get("steelValue", 2))
+        self.titanium = float(self.me.get("titaniumValue", 3))
+        self.energy = 1.0
+        self.tags = dict(self.me.get("tags") or {})
+        self.hand = view.get("cardsInHand") or []
+        self.tableau = {c["name"]: c for c in self.me.get("tableau", [])}
+
+    def greeneries(self, color=None):
+        return sum(1 for s in self.game.get("spaces", []) if s.get("tileType") is not None
+                   and data.tile_name(s["tileType"]) == "greenery" and (color is None or s.get("color") == color))
+
+    def _pace(self, history):
+        def steps(e):
+            s = max(0, (e.get("temperature", -30) + 30) // 2) + e.get("oxygen", 0) + e.get("oceans", 0)
+            if self.venus_counts:
+                s += max(0, e.get("venus", 0) // 2)
+            return s
+        if len(history) >= 2:
+            recent = history[-3:]
+            per_gen = (steps(recent[-1]) - steps(recent[0])) / (len(recent) - 1)
+            if per_gen > 0:
+                return per_gen
+        return 5.0  # typical 4-player pace when there is no history yet
+
+    def summary(self):
+        return (f"OUTLOOK: generation {self.generation}, about {self.gens_left} generation(s) left including this one "
+                f"({self.remaining_steps} terraforming steps remain at ~{self.pace:.1f}/generation → {self.by_pace}; "
+                f"typical game length → {self.by_length}; override with --gens) → "
+                f"{self.phases} spendable production phase(s). Rates: VP {VP:g}, TR {TR:g}, heat {self.heat:g}, "
+                f"plant {self.plant:g}, steel {self.steel:g}, Ti {self.titanium:g}, card {CARD:g} M€.")
+
+
+# --------------------------------------------------------------------------------------------- valuation
+
+class Valuation:
+    def __init__(self, name):
+        self.name = name
+        self.value = 0.0
+        self.parts = []      # (label, M€)
+        self.flags = []      # context notes
+        self.manual = []     # things the numbers don't cover
+        self.raises = {"temperature": 0, "oxygen": 0, "venus": 0, "oceans": 0}
+        self.tiles = {"city": 0, "greenery": 0, "ocean": 0, "other": 0}
+        self.prod = {}       # production change by resource
+        self.stock = {}
+        self.tr = 0.0
+        self.colonies = 0
+        self.draws = 0
+        self.card_resources = 0
+        self.tokens = 0      # underground tokens claimed (Tunneler, Excavator)
+        self.attack = False
+
+    def add(self, label, amount):
+        if amount:
+            self.value += amount
+            self.parts.append((label, amount))
+
+
+def _resolve(count, card_tags, ctx):
+    """Evaluate a Countable (a number, or a dict such as {"tag": "jovian", "per": 2})."""
+    if count is None:
+        return 0
+    if isinstance(count, (int, float)):
+        return count
+    total = 0
+    if "tag" in count:
+        tags = count["tag"] if isinstance(count["tag"], list) else [count["tag"]]
+        if count.get("all") or count.get("others"):
+            players = ctx.rivals if count.get("others") else ctx.players
+            total += sum((p.get("tags") or {}).get(t, 0) for p in players for t in tags)
+        else:
+            total += sum(ctx.tags.get(t, 0) for t in tags) + ctx.tags.get("wild", 0) + sum(card_tags.count(t) for t in tags)
+    # As in the app, cities and greeneries count every player's tiles unless `all` is false.
+    if "cities" in count:
+        total += ctx.me["citiesCount"] if count.get("all") is False else sum(p["citiesCount"] for p in ctx.players)
+    if "greeneries" in count:
+        total += ctx.greeneries(None if count.get("all") is not False else ctx.me["color"])
+    if "oceans" in count:
+        total += ctx.oceans
+    if "colonies" in count:
+        total += sum(p["coloniesCount"] for p in ctx.players) if count.get("all") else ctx.me["coloniesCount"]
+    total *= count.get("each", 1)
+    if count.get("per"):
+        total //= count["per"]
+    return total
+
+
+def _unit(res, ctx):
+    return {"megacredits": 1.0, "steel": ctx.steel, "titanium": ctx.titanium, "plants": ctx.plant,
+            "energy": ctx.energy, "heat": ctx.heat}.get(res, 1.0)
+
+
+def _resource_vp_value(card_name, ctx, resource_type=None):
+    """M€ value of one resource placed on a card, from that card's VP rule."""
+    beh = data.behavior(card_name) or {}
+    vp = beh.get("vp")
+    if isinstance(vp, dict) and "resourcesHere" in vp:
+        per = vp.get("per") or (vp["resourcesHere"] if isinstance(vp["resourcesHere"], int) else 1) or 1
+        return VP / per
+    return 0.5
+
+
+def _best_target(ctx, resource_type, exclude=None, this_card=None):
+    best, best_name = 0.5, None
+    candidates = list(ctx.tableau) + ([this_card] if this_card and this_card not in ctx.tableau else [])
+    for name in candidates:
+        if name == exclude:
+            continue
+        info = data.card(name) or {}
+        if resource_type and info.get("resource") != resource_type:
+            continue
+        if not resource_type and not info.get("resource"):
+            continue
+        v = _resource_vp_value(name, ctx)
+        if v > best:
+            best, best_name = v, name
+    return best, best_name
+
+
+def _apply(beh, v, ctx, card_tags, card_name, scale=1.0, label=""):
+    """Price one Behavior dict into v. `scale` > 1 for repeated actions."""
+    if not beh:
+        return
+    pre = f"{label}" if label else ""
+    if "or" in beh:
+        best = None
+        for option in beh["or"].get("behaviors", []):
+            trial = Valuation(card_name)
+            _apply(option, trial, ctx, card_tags, card_name)
+            if best is None or trial.value > best.value:
+                best = trial
+        if best:
+            v.add(pre + "best option", best.value * scale)
+            v.raises = {k: v.raises[k] + best.raises[k] * scale for k in v.raises}
+    for key in ("spend", "lose"):
+        if key in beh:
+            spend = beh[key]
+            if key == "lose":
+                spend = spend.get("stock") or spend.get("production") or {}
+            for res, amt in spend.items():
+                if res in ("canUseSteel", "canUseTitanium"):
+                    continue
+                n = _resolve(amt, card_tags, ctx)
+                if res == "resourcesHere":
+                    continue
+                cost = n * (_unit(res, ctx) if res in ("megacredits", "steel", "titanium", "plants", "energy", "heat") else 1.0)
+                v.add(f"{pre}spend {n:g} {res}", -cost * scale)
+    if "production" in beh:
+        for res, amt in beh["production"].items():
+            n = _resolve(amt, card_tags, ctx)
+            phases = ctx.plant_phases if res == "plants" else ctx.phases
+            v.prod[res] = v.prod.get(res, 0) + n
+            v.add(f"{pre}{n:+g} {res} prod × {phases}", n * _unit(res, ctx) * phases * scale)
+    if "stock" in beh:
+        for res, amt in beh["stock"].items():
+            n = _resolve(amt, card_tags, ctx)
+            v.stock[res] = v.stock.get(res, 0) + n
+            v.add(f"{pre}{n:g} {res}", n * _unit(res, ctx) * scale)
+    if "standardResource" in beh:
+        sr = beh["standardResource"]
+        n = sr if isinstance(sr, (int, float)) else sr.get("count", 1)
+        v.add(f"{pre}{n:g} standard resource", 2.0 * n * scale)
+    if "drawCard" in beh:
+        dc = beh["drawCard"]
+        n = dc if isinstance(dc, (int, float)) else _resolve(dc.get("count", 1), card_tags, ctx)
+        keep = n if isinstance(dc, (int, float)) else dc.get("keep", n)
+        v.draws += keep * scale
+        v.add(f"{pre}draw {keep:g}" + (f" of {n:g}" if keep != n else ""), (keep * CARD + (n - keep) * 0.5) * scale)
+    if "tr" in beh:
+        n = _resolve(beh["tr"], card_tags, ctx)
+        v.tr += n * scale
+        v.add(f"{pre}{n:g} TR", n * TR * scale)
+    if "global" in beh:
+        for param, steps in beh["global"].items():
+            left = ctx.left.get(param, 0)
+            gained = max(0, min(steps, left)) if steps > 0 else 0
+            v.raises[param] += steps * scale
+            v.tr += gained * scale
+            v.add(f"{pre}{param} +{steps}" + (" (maxed)" if gained == 0 and steps > 0 else ""), gained * TR * scale)
+    if "ocean" in beh:
+        n = beh["ocean"].get("count", 1) if isinstance(beh["ocean"], dict) else 1
+        gained = min(n, ctx.left["oceans"])
+        v.raises["oceans"] += n * scale
+        v.tiles["ocean"] += n * scale
+        v.tr += gained * scale
+        v.add(f"{pre}{n} ocean" + (" (oceans full)" if gained == 0 else ""), gained * (TR + OCEAN_ADJACENCY) * scale)
+    if "greenery" in beh:
+        o2 = 1 if ctx.left["oxygen"] else 0
+        v.raises["oxygen"] += 1 * scale
+        v.tiles["greenery"] += scale
+        v.tr += o2 * scale
+        v.add(f"{pre}greenery", (VP + o2 * TR) * scale)
+    if "city" in beh:
+        v.tiles["city"] += scale
+        v.add(f"{pre}city tile (placement-dependent)", CITY_TILE * scale)
+        if beh["city"].get("space"):
+            v.flags.append("city goes on a reserved off-map area: it scores no greenery adjacency")
+    if "tile" in beh:
+        v.tiles["other"] += scale
+        v.add(f"{pre}special tile", SPECIAL_TILE * scale)
+    if "addResources" in beh:
+        n = _resolve(beh["addResources"], card_tags, ctx)
+        v.card_resources += n * scale
+        v.add(f"{pre}{n:g} resource here", n * _resource_vp_value(card_name, ctx) * scale)
+    if "addResourcesToAnyCard" in beh:
+        adds = beh["addResourcesToAnyCard"]
+        for add in adds if isinstance(adds, list) else [adds]:
+            n = _resolve(add.get("count", 1), card_tags, ctx)
+            each, target = _best_target(ctx, add.get("type"), exclude=card_name if add.get("excludeThis") else None,
+                                        this_card=card_name)
+            v.card_resources += n * scale
+            v.add(f"{pre}{n:g} {add.get('type', 'resource')} to " + (target or "a card (no scoring target)"), n * each * scale)
+    if "removeAnyPlants" in beh or "decreaseAnyProduction" in beh or "removeResourcesFromAnyCard" in beh:
+        v.attack = True
+    if "colonies" in beh:
+        col = beh["colonies"]
+        if "buildColony" in col:
+            v.colonies += scale
+            v.add(f"{pre}colony (placement bonus + owner bonuses)", COLONY * scale)
+        if col.get("addTradeFleet"):
+            v.add(f"{pre}+{col['addTradeFleet']} trade fleet", 6.0 * col["addTradeFleet"] * ctx.gens_left * scale)
+    if "underworld" in beh:
+        uw = beh["underworld"]
+        if "excavate" in uw:
+            ex = uw["excavate"]
+            n = int(ex if isinstance(ex, (int, float)) else _resolve(ex.get("count", 1), card_tags, ctx))
+            best = reachable_tokens(ctx)
+            known = [t for t, _ in best[:n] if token_value(t, ctx) > blind_dig_value(ctx)]
+            amount = sum(token_value(t, ctx) for t in known) + (n - len(known)) * blind_dig_value(ctx)
+            v.tokens += n * scale
+            label = f"{pre}excavate {n}" + (f" (best known: {', '.join(known)})" if known else f" (blind ≈{blind_dig_value(ctx):.1f} each)")
+            v.add(label, amount * scale)
+            if best:
+                v.flags.append("identified tokens you can dig next to your tiles: " +
+                               ", ".join(f"{t} at {sid} (≈{token_value(t, ctx):.0f})" for t, sid in best[:4]))
+        if "identify" in uw:
+            ident = uw["identify"]
+            count = ident if isinstance(ident, (int, float)) else ident.get("count", 1)
+            claim = 0 if isinstance(ident, (int, float)) else ident.get("claim", 0)
+            if claim:
+                v.tokens += claim * scale
+                v.add(f"{pre}identify {count:g}, claim {claim:g} (best of {count:g} ≈{best_of_value(ctx, count):.1f})",
+                      claim * best_of_value(ctx, count) * scale)
+            else:
+                v.add(f"{pre}identify {count:g}", 0.5 * scale)
+        if "corruption" in uw:
+            n = _resolve(uw["corruption"], card_tags, ctx)
+            v.add(f"{pre}{n:g} corruption", n * corruption_value(ctx) * scale)
+    if beh.get("titaniumValue"):
+        v.manual.append("raises your titanium value: count your remaining space cards")
+    if beh.get("steelValue"):
+        v.manual.append("raises your steel value: count your remaining building cards")
+    if beh.get("greeneryDiscount"):
+        v.add(f"{pre}greeneries cost 1 plant less", ctx.plant * ctx.plant_phases * 0.5)
+
+
+def value_card(name, ctx, cost=None, buying=False, model=None):
+    """Value a card for this player in this game. Returns a Valuation."""
+    info = data.card(name) or {}
+    beh = data.behavior(name) or ({"behavior": STANDARD_BEHAVIORS[name]} if name in STANDARD_BEHAVIORS else {})
+    v = Valuation(name)
+    v.info = info
+    ctype = info.get("type")
+    tags = info.get("tags", [])
+    persistent = [] if ctype == "event" else tags
+    v.persistent_tags = persistent
+    v.event_tags = tags if ctype == "event" else []
+
+    if ctype in ("corporation", "prelude") and info.get("startingMC"):
+        v.add("starting M€" if ctype == "corporation" else "M€", info["startingMC"])
+    if beh.get("behavior"):
+        _apply(beh["behavior"], v, ctx, persistent, name)
+    if beh.get("firstAction"):
+        fa = dict(beh["firstAction"])
+        fa.pop("text", None)
+        _apply(fa, v, ctx, persistent, name, label="first action: ")
+
+    vp = beh.get("vp")
+    if isinstance(vp, (int, float)):
+        v.add(f"{vp:g} VP", vp * VP)
+    elif isinstance(vp, dict):
+        if "resourcesHere" in vp:
+            per = vp.get("per") or (vp["resourcesHere"] if isinstance(vp["resourcesHere"], int) else 1) or 1
+            # Resources already here score now; future ones are valued where they come from (its action).
+            current = (model or ctx.tableau.get(name) or {}).get("resources") or 0
+            if current:
+                v.add(f"{current} resources here ÷ {per} → VP", (current // per) * VP)
+            if not (beh.get("action") or {}).get("addResources"):
+                v.manual.append("VP depends on resources other cards or effects put here")
+        elif "tag" in vp:
+            n = _resolve({"tag": vp["tag"]}, persistent, ctx) // (vp.get("per") or 1)
+            v.add(f"{n:g} VP from {vp['tag']} tags now", n * VP)
+        elif "cities" in vp:
+            n = (ctx.me["citiesCount"] + v.tiles["city"]) if vp.get("all") is False else \
+                sum(p["citiesCount"] for p in ctx.players) + v.tiles["city"]
+            per = vp.get("per", 1)
+            v.add(f"{n // per:g} VP from {n} cities in play now", (n // per) * VP)
+            v.flags.append("VP grows as anyone places cities")
+        else:
+            v.manual.append("VP rule not modelled: read the card")
+    elif vp == "special":
+        v.manual.append("special VP rule: read the card")
+
+    action = beh.get("action")
+    if action:
+        trial = Valuation(name)
+        _apply(action, trial, ctx, persistent, name)
+        per_use = trial.value
+        uses = ctx.gens_left
+        if per_use > 0:
+            v.add(f"action ×{uses} (≈{per_use:.1f} each)", per_use * uses)
+            for k in v.raises:
+                v.raises[k] += trial.raises[k] * uses
+            v.tr += trial.tr * uses
+            v.card_resources += trial.card_resources * uses
+        else:
+            v.flags.append(f"its action is worth ≈{per_use:.1f} M€ per use at current rates")
+    discount = beh.get("cardDiscount")
+    if discount:
+        discounts = discount if isinstance(discount, list) else [discount]
+        for d in discounts:
+            plays = (1.0 if d.get("tag") else 2.5) * ctx.gens_left
+            v.add(f"discount {d.get('amount', 0)}" + (f" on {d['tag']}" if d.get("tag") else "") + f" × ~{plays:g} plays",
+                  d.get("amount", 0) * plays)
+    if beh.get("tr") and not beh.get("behavior", {}).get("tr") and beh.get("bespokePlay"):
+        tr = beh["tr"]
+        steps = sum(min(tr.get(k, 0), ctx.left.get({"oceans": "oceans"}.get(k, k), 99)) for k in ("temperature", "oxygen", "venus", "oceans")) + tr.get("tr", 0)
+        if steps:
+            v.add(f"~{steps:g} TR (from the card's TR hint)", steps * TR)
+            for k in ("temperature", "oxygen", "venus", "oceans"):
+                v.raises[k] += tr.get(k, 0)
+            v.tr += steps
+    if beh.get("bespokePlay"):
+        v.manual.append("part of its play effect is custom code: read the card text")
+    if beh.get("bespokeAction"):
+        v.manual.append("its action is custom code: read the card text")
+    if beh.get("triggers"):
+        v.manual.append("ongoing effect (" + ", ".join(beh["triggers"]) + "): value depends on future plays")
+    if name in ("Convert Plants", "Convert Heat"):
+        v.flags.append("uses 8 " + ("plants" if name == "Convert Plants" else "heat") + " (priced at 0: no other use)")
+    if not beh and ctype not in ("corporation",):
+        v.manual.append("no structured effect data for this card")
+
+    if cost is None:
+        cost = (model or {}).get("calculatedCost", info.get("cost") or 0)
+    if ctype in ("prelude", "corporation", "ceo"):
+        cost = 0
+    v.cost = cost or 0
+    bought = ctype in ("automated", "active", "event")  # only project cards carry the 3 M€ purchase price
+    v.paid = v.cost + (BUY_COST if buying and bought else 0)
+    _context(v, ctx)
+    v.net = v.value - v.paid
+    v.ratio = (v.value / v.paid) if v.paid else None
+    return v
+
+
+# --------------------------------------------------------------------------------------------- underworld
+
+def corruption_value(ctx):
+    """Corruption cancels negative card VP at game end (1 VP each); otherwise it mainly blocks attacks."""
+    vp = ctx.me.get("victoryPointsBreakdown") or {}
+    have = (ctx.me.get("underworldData") or {}).get("corruption", 0)
+    return VP if abs(vp.get("negativeVP", 0) or 0) > have else 1.0
+
+
+def token_value(token, ctx):
+    """M€ value of claiming one underground token now."""
+    microbe, _ = _best_target(ctx, "Microbe")
+    return {
+        "nothing": 0, "card1": CARD, "card2": 2 * CARD,
+        "corruption1": corruption_value(ctx), "corruption2": 2 * corruption_value(ctx),
+        "steel2plant": 2 * ctx.steel + ctx.plant, "steel1production": ctx.steel * ctx.phases,
+        "titanium2": 2 * ctx.titanium, "titanium1production": ctx.titanium * ctx.phases,
+        "titaniumandplant": ctx.titanium + ctx.plant, "plant2": 2 * ctx.plant, "plant3": 3 * ctx.plant,
+        "plant1production": ctx.plant * ctx.plant_phases, "energy2": 2 * ctx.energy,
+        "energy1production": ctx.energy * ctx.phases, "heat2production": 2 * ctx.heat * ctx.phases,
+        "microbe2": 2 * microbe, "tr": TR,
+        "ocean": (TR + OCEAN_ADJACENCY - 4) if ctx.left["oceans"] else 0,
+        "sciencetag": 2.0, "planttag": 2.0, "anyresource1": 2.0, "place6mc": 0,
+        # Temporary bonuses pay per 2 °C raised this generation; assume one step.
+        "plant2pertemp": 2 * ctx.plant if ctx.left["temperature"] else 0,
+        "steel2pertemp": 2 * ctx.steel if ctx.left["temperature"] else 0,
+        "titanium1pertemp": ctx.titanium if ctx.left["temperature"] else 0,
+        "microbe2pertemp": 2 * microbe if ctx.left["temperature"] else 0,
+        "mcprod1pertemp": ctx.phases if ctx.left["temperature"] else 0,
+        "oceanrequirementmod": 1.0, "oxygenrequirementmod": 1.0, "temprequirementmod": 1.0,
+    }.get(token, 1.0)
+
+
+def _bag(ctx):
+    """Tokens still in the bag: the full set minus identified and claimed ones visible to us."""
+    bag = dict(TOKEN_COUNTS)
+    seen = [s["undergroundResource"] for s in ctx.game.get("spaces", []) if s.get("undergroundResource")]
+    for p in ctx.players:
+        seen += [t["token"] for t in (p.get("underworldData") or {}).get("tokens", [])]
+    for t in seen:
+        if bag.get(t, 0) > 0:
+            bag[t] -= 1
+    return bag
+
+
+def blind_dig_value(ctx):
+    bag = _bag(ctx)
+    total = sum(bag.values())
+    return sum(n * token_value(t, ctx) for t, n in bag.items()) / total if total else 0.0
+
+
+def best_of_value(ctx, k):
+    """Expected value of the best of k random tokens (drawn with replacement; close enough)."""
+    bag = _bag(ctx)
+    total = sum(bag.values())
+    if not total:
+        return 0.0
+    values = sorted(token_value(t, ctx) for t, n in bag.items() for _ in range(n))
+    n = len(values)
+    # P(max <= values[i]) = ((i+1)/n)^k
+    expected, prev = 0.0, 0.0
+    for i, val in enumerate(values):
+        cdf = ((i + 1) / n) ** k
+        expected += val * (cdf - prev)
+        prev = cdf
+    return expected
+
+
+def reachable_tokens(ctx):
+    """Identified, unexcavated tokens on spaces you may excavate (next to your tiles or excavations)."""
+    spaces = {s["id"]: s for s in ctx.game.get("spaces", [])}
+    board = ctx.game["gameOptions"].get("boardName", "")
+    mine = [s["id"] for s in spaces.values()
+            if (s.get("color") == ctx.me["color"] and s.get("tileType") is not None) or s.get("excavator") == ctx.me["color"]]
+    near = {a for sid in mine for a in data.adjacency(board, sid)} if mine else set(spaces)
+    hits = [(s["undergroundResource"], sid) for sid, s in spaces.items()
+            if sid in near and s.get("undergroundResource") and not s.get("excavator")]
+    return sorted(hits, key=lambda h: -token_value(h[0], ctx))
+
+
+# --------------------------------------------------------------------------------------------- context
+
+def _context(v, ctx):
+    _requirements(v, ctx)
+    _thresholds(v, ctx)
+    _planetary(v, ctx)
+    _milestones(v, ctx)
+    _awards(v, ctx)
+    _unlocks(v, ctx)
+    _rival_triggers(v, ctx)
+    if v.attack:
+        _attack(v, ctx)
+    if v.event_tags:
+        v.flags.append("event: its tags count for planetary tracks and triggers now, but not for milestones or awards")
+
+
+_REQ = re.compile(r"^(max )?(\d+) (\w+) tag")
+
+
+def requirement_status(req, ctx, extra_tags=()):
+    """(met, text) for one requirement string from cards.json, or (None, text) if not checkable."""
+    m = _REQ.match(req)
+    if m:
+        n, tag = int(m.group(2)), m.group(3)
+        have = ctx.tags.get(tag, 0) + ctx.tags.get("wild", 0) + list(extra_tags).count(tag)
+        return (have <= n if m.group(1) else have >= n), f"{tag} tags {have}/{n}"
+    m = re.match(r"^(max )?(temperature|oxygen|oceans|venus|tr|cities|colonies|greeneries) (-?\d+)", req)
+    if m:
+        n = int(m.group(3))
+        have = {"temperature": ctx.temp, "oxygen": ctx.oxygen, "oceans": ctx.oceans, "venus": ctx.venus,
+                "tr": ctx.me["terraformRating"], "cities": ctx.me["citiesCount"],
+                "colonies": ctx.me["coloniesCount"], "greeneries": None}[m.group(2)]
+        if have is None:
+            return None, req
+        return (have <= n if m.group(1) else have >= n), f"{m.group(2)} {have} (needs {'≤' if m.group(1) else '≥'}{n})"
+    return None, req
+
+
+def _requirements(v, ctx):
+    for req in v.info.get("req", []):
+        met, text = requirement_status(req, ctx)
+        if met is False:
+            v.flags.append(f"NOT PLAYABLE YET: {text}")
+        elif met is None and "any player" not in req:
+            v.manual.append(f"check requirement: {req}")
+
+
+def _thresholds(v, ctx):
+    r = v.raises
+    if r["temperature"] > 0 and ctx.left["temperature"]:
+        steps = int(min(r["temperature"], ctx.left["temperature"]))
+        before, after = ctx.temp, ctx.temp + 2 * steps
+        for t in (-24, -20):
+            if before < t <= after:
+                v.add(f"temperature reaches {t}°C: +1 heat production", ctx.heat * ctx.phases)
+        if before < 0 <= after and ctx.left["oceans"]:
+            v.add("temperature reaches 0°C: bonus ocean", TR + OCEAN_ADJACENCY)
+        if steps == ctx.left["temperature"]:
+            holders = [f"{p['name']} ({p['heat']} heat)" for p in ctx.rivals if p["heat"] >= 8]
+            v.flags.append("takes the LAST temperature step" + (f": strands {', '.join(holders)}" if holders else ""))
+    if r["oxygen"] > 0 and ctx.left["oxygen"]:
+        steps = min(r["oxygen"], ctx.left["oxygen"])
+        if ctx.oxygen < 8 <= ctx.oxygen + steps:
+            if ctx.left["temperature"]:
+                v.add("oxygen reaches 8%: bonus temperature step", TR)
+                if -2 <= ctx.temp < 0 and ctx.left["oceans"]:
+                    v.flags.append("that temperature step reaches 0°C, which also places an ocean")
+            else:
+                v.flags.append("oxygen reaches 8% but temperature is maxed: no bonus")
+        if steps == ctx.left["oxygen"]:
+            holders = [f"{p['name']} ({p['plants']} plants)" for p in ctx.rivals if p["plants"] >= 8]
+            v.flags.append("takes the LAST oxygen step" + (f": later greeneries give no TR ({', '.join(holders)} holding plants)" if holders else ""))
+    if r["venus"] > 0 and ctx.left["venus"]:
+        steps = int(min(r["venus"], ctx.left["venus"]))
+        before, after = ctx.venus, ctx.venus + 2 * steps
+        if ctx.alt_venus:
+            bonus_steps = sum(1 for s in range(1, steps + 1) if before + 2 * s > 16)
+            if bonus_steps:
+                v.add(f"alternative Venus board: {bonus_steps} resource reward(s)", 2.0 * bonus_steps)
+        else:
+            if before < 8 <= after:
+                v.add("Venus reaches 8%: draw a card", CARD)
+            if before < 16 <= after:
+                v.add("Venus reaches 16%: +1 TR", TR)
+        if steps == ctx.left["venus"]:
+            v.flags.append("takes the LAST Venus step")
+    if r["oceans"] > 0 and ctx.left["oceans"] and min(r["oceans"], ctx.left["oceans"]) == ctx.left["oceans"]:
+        v.flags.append("places the LAST ocean: ends every ocean action and ocean card for the table")
+    done = {k: ctx.left[k] - min(ctx.left[k], max(0, r[k])) for k in ("temperature", "oxygen", "oceans", "venus")}
+    if ctx.remaining_steps and done["temperature"] == 0 and done["oxygen"] == 0 and done["oceans"] == 0 and \
+            (not ctx.venus_counts or done["venus"] == 0):
+        v.flags.append("COMPLETES TERRAFORMING: the game ends after this generation")
+
+
+def _reward_value(reward, ctx):
+    return {
+        "1vp": VP, "2vp": 2 * VP, "3mc": 3.0, "6mc": 6.0, "any_resource": 2.0, "card": CARD, "city": CITY_TILE,
+        "delegate": 1.0 if ctx.expansions.get("turmoil") else 0.0, "energy": ctx.energy, "energy_production": ctx.energy * ctx.phases, "floater": 1.0,
+        "greenery": VP + (TR if ctx.left["oxygen"] else 0), "heat": ctx.heat, "heat_production": ctx.heat * ctx.phases,
+        "ocean": (TR + OCEAN_ADJACENCY) if ctx.left["oceans"] else 0, "plant": ctx.plant,
+        "plant_production": ctx.plant * ctx.plant_phases, "resource": 1.0, "steel": ctx.steel,
+        "steel_production": ctx.steel * ctx.phases, "titanium": ctx.titanium,
+        "titanium_production": ctx.titanium * ctx.phases, "tr": TR, "venus_scale": TR if ctx.left["venus"] else 0,
+        "moon_road": SPECIAL_TILE, "moon_mine": SPECIAL_TILE,
+    }.get(reward, 1.0)
+
+
+def _planetary(v, ctx):
+    tracks = ctx.game.get("pathfinders")
+    if not tracks:
+        return
+    spaces = data.planetary_tracks()
+    for track in PLANETARY:
+        n = (v.persistent_tags + v.event_tags).count(track)
+        pos = tracks.get(track)
+        if not n or pos is None or pos < 0:
+            continue
+        layout = spaces.get(track, [])
+        for step in range(pos + 1, min(pos + n, len(layout) - 1) + 1):
+            space = layout[step]
+            mine = [r for r in space.get("risingPlayer", [])]
+            everyone = [r for r in space.get("everyone", [])]
+            if mine:
+                v.add(f"{track} track {step}: you get {', '.join(mine)}", sum(_reward_value(r, ctx) for r in mine))
+                if "venus_scale" in mine:
+                    v.raises["venus"] += 1
+            if everyone:
+                each = sum(_reward_value(r, ctx) for r in everyone)
+                v.add(f"{track} track {step}: everyone gets {', '.join(everyone)}", each)
+                v.flags.append(f"{track} track {step} also gives each rival {', '.join(everyone)} (≈{each:.0f} M€ each)")
+            if space.get("mostTags"):
+                v.flags.append(f"{track} track reaches its end: most {track} tags scores {', '.join(space['mostTags'])}")
+
+
+_MILESTONE_METRICS = {
+    "Terraformer": "tr", "Terraformer29": "tr", "Mayor": "cities", "Gardener": "greeneries", "Builder": "tag:building",
+    "Builder7": "tag:building", "Ecologist": "tags:plant,microbe,animal", "Tycoon": "projects", "Tycoon10": "blue_green",
+    "Legend": "events", "Legend4": "events", "Diversifier": "distinct", "Tactician": "reqcards", "Tactician4": "reqcards",
+    "Energizer": "prod:energy", "Rim Settler": "tag:jovian", "Terran": "tag:earth", "Terran5": "tag:earth",
+    "Economizer": "prod:heat", "Martian": "tag:mars", "T. Spacefarer": "tag:space", "V. Spacefarer": "tag:space",
+    "Spacefarer4": "tag:space", "Architect": "tag:city", "C. Forester": "prod:plants", "Forester": "prod:plants",
+    "V. Electrician": "tag:power", "Smith": "prod:steel,titanium", "Metallurgist": "prod:steel,titanium",
+    "Pioneer": "colonies", "Agronomist": "tag:plant", "Engineer": "prod:energy,heat", "Researcher": "tag:science",
+    "Fundraiser": "prod:megacredits", "Sponsor": "cost20", "One Giant Step": "tag:moon", "Hoverlord": "res:Floater",
+    "Farmer": "res:Animal,Microbe", "Planner": "hand", "Producer": "prod:all", "Tunneler": "tokens",
+}
+
+_AWARD_METRICS = {
+    "Landlord": "tiles", "Scientist": "tag:science", "Banker": "prod:megacredits", "Celebrity": "cost20",
+    "Benefactor": "tr", "Contractor": "tag:building", "Cultivator": "greeneries", "Magnate": "automated",
+    "Space Baron": "tag:space", "Venuphile": "tag:venus", "Full Moon": "tag:moon", "Botanist": "prod:plants",
+    "Promoter": "events", "A. Manufacturer": "active", "Biologist": "tags:plant,microbe,animal", "Forecaster": "reqcards",
+    "Naturalist": "prod:plants,heat", "Voyager": "tag:jovian", "Traveller": "tags:jovian,earth",
+    "Manufacturer": "prod:steel,heat", "Blacksmith": "prod:steel,titanium", "Kingpin": "crime", "Administrator": "notags",
+    "Constructor": "colonies+cities", "Electrician": "tag:power", "Incorporator": "cost10", "Innovator": "projects_events",
+    "Investor": "tag:earth", "Metropolist": "cities", "Mogul": "prod:nonmc", "Physicist": "tags:science,space",
+    "Visionary": "hand", "Miner": "stock:steel,titanium", "Thermalist": "stock:heat", "Industrialist": "stock:steel,energy",
+    "Excentric": "card_resources", "Zoologist": "res:Animal", "A. Zoologist": "res:Animal,Microbe",
+    "Excavator": "tokens",
+}
+
+
+def _metric_delta(metric, v, ctx):
+    """How much playing this card moves one milestone/award metric for you (None = not modelled)."""
+    info = v.info
+    ctype = info.get("type")
+    project = ctype in ("automated", "active", "event")
+    if metric.startswith("tag:"):
+        return v.persistent_tags.count(metric[4:])
+    if metric.startswith("tags:"):
+        return sum(v.persistent_tags.count(t) for t in metric[5:].split(","))
+    if metric.startswith("prod:"):
+        keys = metric[5:]
+        if keys == "all":
+            return sum(v.prod.values())
+        if keys == "nonmc":
+            return sum(n for r, n in v.prod.items() if r != "megacredits")
+        return sum(v.prod.get(r, 0) for r in keys.split(","))
+    if metric.startswith("stock:"):
+        return sum(v.stock.get(r, 0) for r in metric[6:].split(","))
+    if metric.startswith("res:"):
+        rtype = metric[4:].split(",")
+        return v.card_resources if (info.get("resource") in rtype) else None
+    return {
+        "tr": v.tr, "cities": v.tiles["city"], "greeneries": v.tiles["greenery"],
+        "tiles": v.tiles["city"] + v.tiles["greenery"] + v.tiles["other"],
+        "projects": 1 if ctype in ("automated", "active") else 0,
+        "blue_green": 1 if ctype in ("automated", "active") else 0,
+        "projects_events": 1 if project else 0,
+        "events": 1 if ctype == "event" else 0,
+        "automated": 1 if ctype == "automated" else 0,
+        "active": 1 if ctype == "active" else 0,
+        "reqcards": 1 if info.get("req") and ctype in ("automated", "active") else 0,
+        "cost20": 1 if (info.get("cost") or 0) >= 20 and ctype in ("automated", "active") else 0,
+        "cost10": 1 if (info.get("cost") or 99) <= 10 and ctype in ("automated", "active") else 0,
+        "colonies": v.colonies, "colonies+cities": v.colonies + v.tiles["city"],
+        "crime": (v.persistent_tags + v.event_tags).count("crime"),
+        "notags": 1 if not info.get("tags") and ctype in ("automated", "active") else 0,
+        "distinct": len({t for t in v.persistent_tags if t not in ("event", "wild", "clone")}
+                        - {t for t, n in ctx.tags.items() if n and t not in ("event",)}),
+        "hand": v.draws - 1, "card_resources": v.card_resources, "tokens": v.tokens,
+    }.get(metric)
+
+
+def _milestones(v, ctx):
+    ms = ctx.game.get("milestones") or []
+    claimed = sum(1 for m in ms if m.get("playerName"))
+    if claimed >= 3:
+        return
+    for m in ms:
+        if m.get("playerName"):
+            continue
+        metric = _MILESTONE_METRICS.get(m["name"])
+        if not metric:
+            continue
+        delta = _metric_delta(metric, v, ctx)
+        if not delta:
+            continue
+        scores = {s["color"]: s for s in m.get("scores", [])}
+        mine = scores.get(ctx.me["color"], {}).get("score")
+        target = re.search(r"(\d+)", data.milestone_text(m["name"]) or "")
+        if mine is None or not target:
+            continue
+        need = int(target.group(1))
+        if mine < need <= mine + delta:
+            v.add(f"lets you claim {m['name']} (5 VP for 8 M€)", 5 * VP - 8)
+            v.flags.append(f"MILESTONE: {m['name']} {mine}→{mine + delta}/{need}: claimable after this")
+        elif mine < need and mine + delta >= need - 2:
+            v.flags.append(f"milestone {m['name']}: {mine}→{mine + delta} of {need}")
+
+
+def _award_points(scores, n_players):
+    """VP each color gets from an award, using first 5 / second 2 and the tie rules."""
+    if not scores:
+        return {}
+    top = max(scores.values())
+    firsts = [c for c, s in scores.items() if s == top]
+    out = {c: 0 for c in scores}
+    for c in firsts:
+        out[c] = 5
+    if len(firsts) == 1 and n_players > 2:
+        rest = [s for c, s in scores.items() if c not in firsts]
+        if rest:
+            second = max(rest)
+            for c, s in scores.items():
+                if s == second and c not in firsts:
+                    out[c] = 2
+    return out
+
+
+def _awards(v, ctx):
+    aw = ctx.game.get("awards") or []
+    funded = sum(1 for a in aw if a.get("playerName"))
+    for a in aw:
+        if funded >= 3 and not a.get("playerName"):
+            continue
+        metric = _AWARD_METRICS.get(a["name"])
+        if not metric:
+            continue
+        delta = _metric_delta(metric, v, ctx)
+        if not delta:
+            continue
+        scores = {s["color"]: s["score"] for s in a.get("scores", [])}
+        if ctx.me["color"] not in scores:
+            continue
+        before = _award_points(scores, len(ctx.players))
+        after_scores = dict(scores)
+        after_scores[ctx.me["color"]] += delta
+        after = _award_points(after_scores, len(ctx.players))
+        mine = after[ctx.me["color"]] - before[ctx.me["color"]]
+        rival_changes = [f"{ctx.names[c]} {after[c] - before[c]:+d}" for c in scores
+                         if c != ctx.me["color"] and after[c] != before[c]]
+        status = "funded" if a.get("playerName") else "not funded"
+        text = f"{a['name']} ({status}): you {scores[ctx.me['color']]}→{after_scores[ctx.me['color']]}"
+        if mine or rival_changes:
+            text += f": you {mine:+d} VP" + (f", {', '.join(rival_changes)} VP" if rival_changes else "")
+            if a.get("playerName") and mine:
+                v.add(f"{a['name']} award position", mine * VP)
+            v.flags.append("AWARD " + text)
+
+
+
+def _unlocks(v, ctx):
+    if not v.persistent_tags:
+        return
+    for c in ctx.hand:
+        if c["name"] == v.name:
+            continue
+        for req in (data.card(c["name"]) or {}).get("req", []):
+            before, _ = requirement_status(req, ctx)
+            after, text = requirement_status(req, ctx, extra_tags=v.persistent_tags)
+            if before is False and after is True:
+                v.flags.append(f"meets {c['name']}'s requirement ({text})")
+
+
+def _rival_triggers(v, ctx):
+    hits = {"venus": v.raises["venus"] > 0, "colony": v.colonies > 0, "greenery": v.tiles["greenery"] > 0,
+            "city": v.tiles["city"] > 0, "ocean": v.tiles["ocean"] > 0,
+            "jovian": "jovian" in v.persistent_tags + v.event_tags,
+            "microbe": "microbe" in v.persistent_tags + v.event_tags}
+    for p in ctx.players:
+        for card in p.get("tableau", []):
+            trig = ANY_PLAYER_TRIGGERS.get(card["name"])
+            if trig and hits.get(trig[0]):
+                who = "your" if p["color"] == ctx.me["color"] else f"{p['name']}'s"
+                if card["name"] == "Exploitation Of Venus":
+                    steps = min(v.raises["venus"], ctx.left["venus"])
+                    v.add(f"{who} Exploitation Of Venus pays you per Venus step", 2.0 * steps)
+                    continue
+                v.flags.append(f"triggers {who} {card['name']}: {trig[1]}")
+            elif p["color"] != ctx.me["color"]:
+                beh = data.behavior(card["name"]) or {}
+                if any(t.endswith("ByAnyPlayer") for t in beh.get("triggers", [])) and card["name"] not in ANY_PLAYER_TRIGGERS:
+                    v.flags.append(f"{p['name']}'s {card['name']} reacts to other players' plays: check whether this triggers it")
+
+
+def _attack(v, ctx):
+    notes = []
+    for p in ctx.rivals:
+        corruption = (p.get("underworldData") or {}).get("corruption", 0)
+        names = {c["name"] for c in p.get("tableau", [])}
+        bits = [f"{p['plants']} plants"]
+        if corruption:
+            bits.append(f"{corruption} corruption (can block)")
+        if "Botanical Experience" in names:
+            bits.append("loses only half its plants")
+        notes.append(f"{p['name']}: " + ", ".join(bits))
+    v.flags.append("attack: " + "; ".join(notes))
+
+
+# --------------------------------------------------------------------------------------------- output
+
+def describe(v, where=""):
+    ratio = f"{v.ratio:.2f}" if v.ratio is not None else "n/a"
+    paid = f"pay {v.paid:g}" + (f" ({v.cost:g} + {BUY_COST} to buy)" if v.paid != v.cost else "")
+    head = f"{v.name}{' [' + where + ']' if where else ''} — {paid} · value ≈{v.value:.0f} · net {v.net:+.0f} · ratio {ratio}"
+    lines = [head]
+    if v.parts:
+        lines.append("    " + "; ".join(f"{label} {amt:+.1f}" for label, amt in v.parts))
+    for f in v.flags:
+        lines.append(f"    ⚑ {f}")
+    for m in v.manual:
+        lines.append(f"    ? {m}")
+    return lines

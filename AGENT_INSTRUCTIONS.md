@@ -67,6 +67,11 @@ the choices changed, use the new ids it printed.
 - `tfm -s <seat> board`: every tile on the board, by owner.
 - `tfm -s <seat> log`: this generation's full log.
 - `tfm card "<name>" ...`: card text.
+- `tfm -s <seat> value [card ...]`: what each card in your pending decision and hand (or the cards you
+  name) is worth in M€ right now, against what it costs, plus context flags: bonus thresholds, the last
+  step of a parameter, planetary-track rewards, milestones you could claim, award placings it changes,
+  requirements, rivals' payouts and attack blockers. `tfm -s <seat> turn --value` appends it to the
+  turn. Use it for drafting, buying and close choices; it is an estimate, so read any `?` lines yourself.
 
 ## Confirm mode
 

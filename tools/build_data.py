@@ -2,9 +2,13 @@
 
 Usage:
     # in the app checkout, after `npm ci && npm run build`:
-    cp tools/tfm_cli_export.ts <app>/src/tools/
+    cp tools/tfm_cli_export.ts tools/tfm_cli_cards_export.ts <app>/src/tools/
     (cd <app> && npx tsx src/tools/tfm_cli_export.ts /tmp/tfm_export.json)
-    python3 tools/build_data.py <app> /tmp/tfm_export.json
+    (cd <app> && npx tsx src/tools/tfm_cli_cards_export.ts /tmp/tfm_cards_export.json)
+    python3 tools/build_data.py <app> /tmp/tfm_export.json /tmp/tfm_cards_export.json
+
+The third file (card effects and planetary tracks, used by `tfm value`) is optional; without it
+tfm/data/behaviors.json is left as it is.
 """
 import json
 import sys
@@ -147,6 +151,10 @@ def main():
         }
     (OUT / "colonies.json").write_text(json.dumps(colonies, separators=(",", ":"), ensure_ascii=False))
     (OUT / "board.json").write_text(json.dumps(export, separators=(",", ":")))
+    if len(sys.argv) > 3:
+        behaviors = json.loads(Path(sys.argv[3]).read_text())
+        (OUT / "behaviors.json").write_text(json.dumps(behaviors, separators=(",", ":"), ensure_ascii=False))
+        print(f"wrote effects for {len(behaviors['cards'])} cards to {OUT / 'behaviors.json'}")
     print(f"wrote {len(ma['milestones'])} milestones, {len(colonies)} colonies to {OUT}")
 
 

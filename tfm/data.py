@@ -32,6 +32,17 @@ def card(name):
     return cards()[key] if key else None
 
 
+def behavior(name):
+    """Declarative effects of a card (behavior, action, VP rule...), exported from the app."""
+    key = card_name(name)
+    return _load("behaviors.json")["cards"].get(key) if key else None
+
+
+def planetary_tracks():
+    """Pathfinders planetary tracks: per track, a list of spaces with risingPlayer/everyone/mostTags rewards."""
+    return {k: v["spaces"] for k, v in _load("behaviors.json")["planetaryTracks"].items()}
+
+
 def milestone_text(name):
     return _load("ma.json")["milestones"].get(name)
 
