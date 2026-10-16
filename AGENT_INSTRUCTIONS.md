@@ -78,6 +78,9 @@ the choices changed, use the new ids it printed.
 - `tfm -s <seat> state`: state and choices now, without waiting.
 - `tfm -s <seat> board`: every tile on the board, by owner.
 - `tfm -s <seat> log`: this generation's full log.
+- `tfm -s <seat> vp`: every player's VP if the game ended now. Yours comes from the app; rivals' are
+  recomputed from public information (TR, milestones, award standings, tiles, played cards), because the app
+  may hide them. Cards it can't compute are named with `+?`. Use it before ending the game or funding an award.
 - `tfm card "<name>" ...`: card text.
 - `tfm -s <seat> value [card ...]`: what each card in your pending decision and hand (or the cards you
   name) is worth in M€ right now, against what it costs, plus context flags: bonus thresholds, the last

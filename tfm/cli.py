@@ -11,7 +11,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import data, digest, options, seats, value
+from . import data, digest, options, score, seats, value
 from .client import DEFAULT_SERVER, Client, TfmError, create_game, parse_link
 from .text import card_line, message
 
@@ -187,6 +187,19 @@ def cmd_value(args):
     _print_values(_client(seat).player(), args.names, args.gens)
 
 
+def cmd_vp(args):
+    seat = seats.load(args.seat)
+    client = _client(seat)
+    view = client.player()
+    trades = None
+    if score.vp_trade_colonies(view["game"]):
+        logs = []
+        for g in range(1, view["game"]["generation"] + 1):
+            logs.extend(client.logs(g) or [])
+        trades = score.count_vp_trades(view["game"], logs)
+    print("\n".join(score.report(view, trades)))
+
+
 def cmd_options(args):
     seat = seats.load(args.seat)
     view = _client(seat).player()
@@ -338,6 +351,9 @@ def main(argv=None):
     p.add_argument("names", nargs="*", help="cards to value (default: cards in the pending decision and your hand)")
     p.add_argument("--gens", type=int, help="override the estimated generations left (including this one)")
     p.set_defaults(fn=cmd_value)
+
+    sub.add_parser("vp", help="every player's VP if the game ended now (rivals estimated from public info)"
+                   ).set_defaults(fn=cmd_vp)
 
     p = sub.add_parser("options", help="print only the current choices")
     p.add_argument("--full", action="store_true")
