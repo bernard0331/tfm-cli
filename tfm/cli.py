@@ -195,6 +195,11 @@ def cmd_options(args):
     _finish(seat, ctx)
 
 
+def _leaf_matches(leaf, text):
+    text = text.lower()
+    return text in leaf.label.lower() or (isinstance(leaf.fixed, str) and text in leaf.fixed.lower())
+
+
 def cmd_play(args):
     seat = seats.load(args.seat)
     client = _client(seat)
@@ -208,7 +213,17 @@ def cmd_play(args):
         _print_options(view, ctx, seat)
         _finish(seat, ctx)
         sys.exit(2)
-    leaf = options.find_leaf(options.leaves(wf, ctx), args.choice)
+    all_leaves = options.leaves(wf, ctx)
+    leaf = options.find_leaf(all_leaves, args.choice)
+    if args.expect and not _leaf_matches(leaf, args.expect):
+        print(f"Option [{leaf.id}] is now \"{leaf.label}\", which doesn't contain \"{args.expect}\", "
+              "so nothing was submitted.")
+        matches = [lf.id for lf in all_leaves if _leaf_matches(lf, args.expect)]
+        if matches:
+            print(f"Options containing \"{args.expect}\": {', '.join(matches)}")
+        _print_options(view, ctx, seat)
+        _finish(seat, ctx)
+        sys.exit(2)
     response = options.build_response(leaf, args.values, ctx)
     if seat.get("mode") == "confirm" and not args.yes:
         print(f"CONFIRM MODE: proposed move [{leaf.id}] {leaf.label}")
@@ -331,6 +346,8 @@ def main(argv=None):
     p = sub.add_parser("play", help="submit a choice: tfm play <id> [value ...]")
     p.add_argument("choice")
     p.add_argument("values", nargs="*")
+    p.add_argument("--expect", metavar="TEXT",
+                   help="refuse unless the chosen option contains TEXT (e.g. the card name), guarding against renumbered ids")
     p.add_argument("--yes", action="store_true", help="confirm a move in confirm mode")
     p.add_argument("--debug", action="store_true", help="print the JSON sent to the server")
     p.set_defaults(fn=cmd_play)

@@ -63,7 +63,7 @@ python3 tools/random_bot.py seat1 seat2 seat3
 |---|---|
 | `tfm join LINK [--as NAME] [--confirm]` | Save a seat (stored in `~/.tfm/seats`; override with `TFM_HOME`) |
 | `tfm -s NAME turn [--wait S] [--full]` | Wait for your turn, then print the state and numbered choices |
-| `tfm -s NAME play ID [VALUE ...]` | Submit a choice |
+| `tfm -s NAME play ID [VALUE ...] [--expect TEXT]` | Submit a choice; `--expect` refuses if the option no longer contains TEXT |
 | `tfm -s NAME state` / `options` | Print state and choices / choices only, without waiting |
 | `tfm -s NAME board` / `log` | List tiles / this generation's log |
 | `tfm card NAME ...` | Card text from the bundled card data |
