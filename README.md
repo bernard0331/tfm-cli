@@ -80,8 +80,8 @@ python3 tools/random_bot.py seat1 seat2 seat3
 
 ### `tfm value`
 
-`tfm value` prices each card's declared effects at fixed rates (1 VP = 5 M€, 1 TR = 8.5 M€, plus
-derived rates for heat, plants, metals and cards in [`docs/STRATEGY.md`](docs/STRATEGY.md) §6), with
+`tfm value` prices each card's declared effects at baseline rates (1 VP = 5 M€; 1 TR = 5 M€ + 1 M€ per
+remaining spendable production phase; heat and plants derived from TR; metals and cards in [`docs/STRATEGY.md`](docs/STRATEGY.md) §6), with
 production counted only for the production phases the game is likely to have left. It prints the
 price (play cost, plus 3 M€ when you'd be buying the card), the estimated value, the net and the
 ratio, then context checks on the live game:

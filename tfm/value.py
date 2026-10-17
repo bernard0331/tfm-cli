@@ -3,11 +3,13 @@
 Two layers:
 
 1. A **baseline number**. Every effect a card declares (production, resources, TR, global steps, tiles,
-   cards, VP) is priced in M€ at fixed exchange rates (1 VP = 5 M€, 1 TR = 8.5 M€, see
-   docs/STRATEGY.md §6), with production counted only for the production phases the game is likely to
+   cards, VP) is priced in M€ (1 VP = 5 M€; 1 TR = 5 M€ + 1 M€ per remaining spendable production
+   phase; see docs/STRATEGY.md §6), with production counted only for the production phases the game is likely to
    have left. Compare it with what you pay (play cost, plus 3 M€ to buy a card you don't own yet).
-2. **Context checks** on the live game: global-parameter bonus thresholds the card would cross, the last
-   step of a parameter, Pathfinders planetary-track rewards its tags trigger (for you and for everyone),
+2. **Context checks** on the live game. The card's steps, tiles and tags run through one event queue
+   (_Sim), so chains are followed: global-parameter bonus thresholds (oxygen 8% → temperature → 0°C ocean),
+   Pathfinders planetary-track rewards (for you and for everyone, including rewards that raise a
+   parameter), the last step of a parameter, and what your own cards' triggers pay (OWN_TRIGGERS). Also:
    milestones it would let you claim, award positions it changes for you and for rivals, requirements it
    meets for cards in your hand, rivals' cards that pay out when you do this, and attacks a rival can block.
 
@@ -16,10 +18,11 @@ custom code are flagged so you read the card text yourself.
 """
 import math
 import re
+from collections import deque
 
 from . import data
 
-VP, TR, CARD, BUY_COST = 5.0, 8.5, 3.5, 3
+VP, CARD, BUY_COST = 5.0, 3.5, 3
 CITY_TILE, SPECIAL_TILE, COLONY = 5.0, 2.0, 10.0
 OCEAN_ADJACENCY = 2.0   # typical ocean-adjacency income on top of the ocean's TR
 PLANETARY = ("venus", "earth", "mars", "jovian", "moon")
@@ -105,10 +108,13 @@ class Outlook:
         self.by_pace, self.by_length = by_pace, by_length
         # Production at the end of each remaining generation except the last can still be spent.
         self.phases = max(0, self.gens_left - 1)
+        # A TR is 1 VP at the end plus 1 M€ of income at every remaining spendable production phase.
+        self.tr = VP + self.phases
         self.plant_phases = self.gens_left  # final plants still become a greenery
         self.remaining_steps = remaining
-        self.heat = 1.0 if self.left["temperature"] else 0.0
-        self.plant = 1.7 if self.left["oxygen"] else 0.6
+        # 8 heat = 1 temperature TR; 8 plants = a greenery (1 VP, plus 1 oxygen TR while oxygen is open).
+        self.heat = self.tr / 8 if self.left["temperature"] else 0.0
+        self.plant = (VP + self.tr) / 8 if self.left["oxygen"] else VP / 8
         self.steel = float(self.me.get("steelValue", 2))
         self.titanium = float(self.me.get("titaniumValue", 3))
         self.energy = 1.0
@@ -137,7 +143,7 @@ class Outlook:
         return (f"OUTLOOK: generation {self.generation}, about {self.gens_left} generation(s) left including this one "
                 f"({self.remaining_steps} terraforming steps remain at ~{self.pace:.1f}/generation → {self.by_pace}; "
                 f"typical game length → {self.by_length}; override with --gens) → "
-                f"{self.phases} spendable production phase(s). Rates: VP {VP:g}, TR {TR:g}, heat {self.heat:g}, "
+                f"{self.phases} spendable production phase(s). Rates: VP {VP:g}, TR {self.tr:g}, heat {self.heat:g}, "
                 f"plant {self.plant:g}, steel {self.steel:g}, Ti {self.titanium:g}, card {CARD:g} M€.")
 
 
@@ -280,27 +286,27 @@ def _apply(beh, v, ctx, card_tags, card_name, scale=1.0, label=""):
     if "tr" in beh:
         n = _resolve(beh["tr"], card_tags, ctx)
         v.tr += n * scale
-        v.add(f"{pre}{n:g} TR", n * TR * scale)
+        v.add(f"{pre}{n:g} TR", n * ctx.tr * scale)
     if "global" in beh:
         for param, steps in beh["global"].items():
             left = ctx.left.get(param, 0)
             gained = max(0, min(steps, left)) if steps > 0 else 0
             v.raises[param] += steps * scale
             v.tr += gained * scale
-            v.add(f"{pre}{param} +{steps}" + (" (maxed)" if gained == 0 and steps > 0 else ""), gained * TR * scale)
+            v.add(f"{pre}{param} +{steps}" + (" (maxed)" if gained == 0 and steps > 0 else ""), gained * ctx.tr * scale)
     if "ocean" in beh:
         n = beh["ocean"].get("count", 1) if isinstance(beh["ocean"], dict) else 1
         gained = min(n, ctx.left["oceans"])
         v.raises["oceans"] += n * scale
         v.tiles["ocean"] += n * scale
         v.tr += gained * scale
-        v.add(f"{pre}{n} ocean" + (" (oceans full)" if gained == 0 else ""), gained * (TR + OCEAN_ADJACENCY) * scale)
+        v.add(f"{pre}{n} ocean" + (" (oceans full)" if gained == 0 else ""), gained * (ctx.tr + OCEAN_ADJACENCY) * scale)
     if "greenery" in beh:
         o2 = 1 if ctx.left["oxygen"] else 0
         v.raises["oxygen"] += 1 * scale
         v.tiles["greenery"] += scale
         v.tr += o2 * scale
-        v.add(f"{pre}greenery", (VP + o2 * TR) * scale)
+        v.add(f"{pre}greenery", (VP + o2 * ctx.tr) * scale)
     if "city" in beh:
         v.tiles["city"] += scale
         v.add(f"{pre}city tile (placement-dependent)", CITY_TILE * scale)
@@ -437,7 +443,7 @@ def value_card(name, ctx, cost=None, buying=False, model=None):
         tr = beh["tr"]
         steps = sum(min(tr.get(k, 0), ctx.left.get({"oceans": "oceans"}.get(k, k), 99)) for k in ("temperature", "oxygen", "venus", "oceans")) + tr.get("tr", 0)
         if steps:
-            v.add(f"~{steps:g} TR (from the card's TR hint)", steps * TR)
+            v.add(f"~{steps:g} TR (from the card's TR hint)", steps * ctx.tr)
             for k in ("temperature", "oxygen", "venus", "oceans"):
                 v.raises[k] += tr.get(k, 0)
             v.tr += steps
@@ -485,8 +491,8 @@ def token_value(token, ctx):
         "titaniumandplant": ctx.titanium + ctx.plant, "plant2": 2 * ctx.plant, "plant3": 3 * ctx.plant,
         "plant1production": ctx.plant * ctx.plant_phases, "energy2": 2 * ctx.energy,
         "energy1production": ctx.energy * ctx.phases, "heat2production": 2 * ctx.heat * ctx.phases,
-        "microbe2": 2 * microbe, "tr": TR,
-        "ocean": (TR + OCEAN_ADJACENCY - 4) if ctx.left["oceans"] else 0,
+        "microbe2": 2 * microbe, "tr": ctx.tr,
+        "ocean": (ctx.tr + OCEAN_ADJACENCY - 4) if ctx.left["oceans"] else 0,
         "sciencetag": 2.0, "planttag": 2.0, "anyresource1": 2.0, "place6mc": 0,
         # Temporary bonuses pay per 2 °C raised this generation; assume one step.
         "plant2pertemp": 2 * ctx.plant if ctx.left["temperature"] else 0,
@@ -549,8 +555,7 @@ def reachable_tokens(ctx):
 
 def _context(v, ctx):
     _requirements(v, ctx)
-    _thresholds(v, ctx)
-    _planetary(v, ctx)
+    _simulate(v, ctx)
     _milestones(v, ctx)
     _awards(v, ctx)
     _unlocks(v, ctx)
@@ -592,91 +597,310 @@ def _requirements(v, ctx):
             v.manual.append(f"check requirement: {req}")
 
 
-def _thresholds(v, ctx):
-    r = v.raises
-    if r["temperature"] > 0 and ctx.left["temperature"]:
-        steps = int(min(r["temperature"], ctx.left["temperature"]))
-        before, after = ctx.temp, ctx.temp + 2 * steps
-        for t in (-24, -20):
-            if before < t <= after:
-                v.add(f"temperature reaches {t}°C: +1 heat production", ctx.heat * ctx.phases)
-        if before < 0 <= after and ctx.left["oceans"]:
-            v.add("temperature reaches 0°C: bonus ocean", TR + OCEAN_ADJACENCY)
-        if steps == ctx.left["temperature"]:
-            holders = [f"{p['name']} ({p['heat']} heat)" for p in ctx.rivals if p["heat"] >= 8]
-            v.flags.append("takes the LAST temperature step" + (f": strands {', '.join(holders)}" if holders else ""))
-    if r["oxygen"] > 0 and ctx.left["oxygen"]:
-        steps = min(r["oxygen"], ctx.left["oxygen"])
-        if ctx.oxygen < 8 <= ctx.oxygen + steps:
-            if ctx.left["temperature"]:
-                v.add("oxygen reaches 8%: bonus temperature step", TR)
-                if -2 <= ctx.temp < 0 and ctx.left["oceans"]:
-                    v.flags.append("that temperature step reaches 0°C, which also places an ocean")
-            else:
-                v.flags.append("oxygen reaches 8% but temperature is maxed: no bonus")
-        if steps == ctx.left["oxygen"]:
-            holders = [f"{p['name']} ({p['plants']} plants)" for p in ctx.rivals if p["plants"] >= 8]
-            v.flags.append("takes the LAST oxygen step" + (f": later greeneries give no TR ({', '.join(holders)} holding plants)" if holders else ""))
-    if r["venus"] > 0 and ctx.left["venus"]:
-        steps = int(min(r["venus"], ctx.left["venus"]))
-        before, after = ctx.venus, ctx.venus + 2 * steps
-        if ctx.alt_venus:
-            bonus_steps = sum(1 for s in range(1, steps + 1) if before + 2 * s > 16)
-            if bonus_steps:
-                v.add(f"alternative Venus board: {bonus_steps} resource reward(s)", 2.0 * bonus_steps)
-        else:
-            if before < 8 <= after:
-                v.add("Venus reaches 8%: draw a card", CARD)
-            if before < 16 <= after:
-                v.add("Venus reaches 16%: +1 TR", TR)
-        if steps == ctx.left["venus"]:
-            v.flags.append("takes the LAST Venus step")
-    if r["oceans"] > 0 and ctx.left["oceans"] and min(r["oceans"], ctx.left["oceans"]) == ctx.left["oceans"]:
-        v.flags.append("places the LAST ocean: ends every ocean action and ocean card for the table")
-    done = {k: ctx.left[k] - min(ctx.left[k], max(0, r[k])) for k in ("temperature", "oxygen", "oceans", "venus")}
-    if ctx.remaining_steps and done["temperature"] == 0 and done["oxygen"] == 0 and done["oceans"] == 0 and \
-            (not ctx.venus_counts or done["venus"] == 0):
-        v.flags.append("COMPLETES TERRAFORMING: the game ends after this generation")
-
-
 def _reward_value(reward, ctx):
     return {
         "1vp": VP, "2vp": 2 * VP, "3mc": 3.0, "6mc": 6.0, "any_resource": 2.0, "card": CARD, "city": CITY_TILE,
         "delegate": 1.0 if ctx.expansions.get("turmoil") else 0.0, "energy": ctx.energy, "energy_production": ctx.energy * ctx.phases, "floater": 1.0,
-        "greenery": VP + (TR if ctx.left["oxygen"] else 0), "heat": ctx.heat, "heat_production": ctx.heat * ctx.phases,
-        "ocean": (TR + OCEAN_ADJACENCY) if ctx.left["oceans"] else 0, "plant": ctx.plant,
+        "greenery": VP + (ctx.tr if ctx.left["oxygen"] else 0), "heat": ctx.heat, "heat_production": ctx.heat * ctx.phases,
+        "ocean": (ctx.tr + OCEAN_ADJACENCY) if ctx.left["oceans"] else 0, "plant": ctx.plant,
         "plant_production": ctx.plant * ctx.plant_phases, "resource": 1.0, "steel": ctx.steel,
         "steel_production": ctx.steel * ctx.phases, "titanium": ctx.titanium,
-        "titanium_production": ctx.titanium * ctx.phases, "tr": TR, "venus_scale": TR if ctx.left["venus"] else 0,
+        "titanium_production": ctx.titanium * ctx.phases, "tr": ctx.tr, "venus_scale": ctx.tr if ctx.left["venus"] else 0,
         "moon_road": SPECIAL_TILE, "moon_mine": SPECIAL_TILE,
     }.get(reward, 1.0)
 
 
-def _planetary(v, ctx):
-    tracks = ctx.game.get("pathfinders")
-    if not tracks:
-        return
-    spaces = data.planetary_tracks()
-    for track in PLANETARY:
-        n = (v.persistent_tags + v.event_tags).count(track)
-        pos = tracks.get(track)
-        if not n or pos is None or pos < 0:
-            continue
-        layout = spaces.get(track, [])
+def _simulate(v, ctx):
+    """Run the card's effects through one event queue against a simulated game state.
+
+    The card's own steps, tiles and tags are queued first (their TR is priced in _apply). Each handler
+    updates the state and may queue further events: oxygen 8% queues a temperature step, 0 °C queues an
+    ocean, a planetary-track reward can raise Venus or place an ocean or greenery. Bonus events are priced
+    here, labelled with what set them off. When the queue is empty, your own cards' triggers are priced
+    from everything that happened (see OWN_TRIGGERS)."""
+    sim = _Sim(v, ctx)
+    sim.run()
+    sim.finish()
+
+
+class _Sim:
+    def __init__(self, v, ctx):
+        self.v, self.ctx = v, ctx
+        self.temp, self.oxygen, self.venus = ctx.temp, ctx.oxygen, ctx.venus
+        self.left = dict(ctx.left)
+        self.tracks = dict(ctx.game.get("pathfinders") or {})
+        self.queue = deque()
+        self.last = []
+        # What actually happened, own effects and bonuses together, for triggers and rival checks.
+        self.steps = {"temperature": 0, "oxygen": 0, "venus": 0}
+        self.tiles = {"ocean": 0, "greenery": v.tiles["greenery"], "city": v.tiles["city"]}
+        self.bonus_tr = 0.0
+
+    @staticmethod
+    def _whole(x):
+        return max(0, int(x + 1e-9))
+
+    def run(self):
+        r, v = self.v.raises, self.v
+        # The card's own effects go first, oceans before temperature (so its ocean fills the track before
+        # a 0 °C bonus ocean is counted) and temperature before oxygen (so an oxygen bonus step only gets
+        # the temperature room the card leaves).
+        self.queue.append(("ocean", self._whole(r["oceans"]), None, ""))
+        self.queue.append(("temperature", self._whole(r["temperature"]), None, ""))
+        self.queue.append(("oxygen", self._whole(r["oxygen"]), None, ""))
+        self.queue.append(("venus", self._whole(r["venus"]), None, ""))
+        for track in PLANETARY:
+            n = (v.persistent_tags + v.event_tags).count(track)
+            if n:
+                self.queue.append(("track", (track, n), None, ""))
+        guard = 0
+        while self.queue and guard < 200:
+            kind, n, label, via = self.queue.popleft()
+            getattr(self, "_" + kind)(n, label, via)
+            guard += 1
+
+    def _price(self, label, amount, tr=0):
+        """Price a bonus event; label is None for the card's own effects, which _apply already priced."""
+        if label:
+            self.v.add(label, amount)
+            self.bonus_tr += tr
+            self.v.tr += tr
+
+    def _temperature(self, n, label, via):
+        ctx, v = self.ctx, self.v
+        for _ in range(min(n, self.left["temperature"])):
+            before, self.temp = self.temp, self.temp + 2
+            self.left["temperature"] -= 1
+            self.steps["temperature"] += 1
+            self._price(label, ctx.tr, tr=1)
+            label = label and f"bonus temperature step{via}"
+            for t in (-24, -20):
+                if before < t <= self.temp:
+                    v.add(f"temperature reaches {t}°C: +1 heat production{via}", ctx.heat * ctx.phases)
+            if before < 0 <= self.temp:
+                if self.left["oceans"]:
+                    self.queue.append(("ocean", 1, f"temperature reaches 0°C: bonus ocean{via}", via))
+                else:
+                    v.flags.append(f"temperature reaches 0°C{via} but oceans are full: no bonus ocean")
+            if not self.left["temperature"]:
+                self.last.append("temperature")
+
+    def _oxygen(self, n, label, via):
+        ctx, v = self.ctx, self.v
+        for _ in range(min(n, self.left["oxygen"])):
+            before, self.oxygen = self.oxygen, self.oxygen + 1
+            self.left["oxygen"] -= 1
+            self.steps["oxygen"] += 1
+            self._price(label, ctx.tr, tr=1)
+            label = label and f"bonus oxygen step{via}"
+            if before < 8 <= self.oxygen:
+                if self.left["temperature"]:
+                    self.queue.append(("temperature", 1, "oxygen reaches 8%: bonus temperature step", " (via oxygen 8%)"))
+                else:
+                    v.flags.append("oxygen reaches 8% but temperature is maxed: no bonus")
+            if not self.left["oxygen"]:
+                self.last.append("oxygen")
+
+    def _ocean(self, n, label, via):
+        placed = min(n, self.left["oceans"])
+        self.left["oceans"] -= placed
+        self.tiles["ocean"] += placed
+        if placed:
+            self._price(label, placed * (self.ctx.tr + OCEAN_ADJACENCY), tr=placed)
+            if not self.left["oceans"]:
+                self.last.append("oceans")
+
+    def _greenery(self, n, label, via):
+        # Only bonus greeneries come through here; the card's own are already in v.raises["oxygen"].
+        self.tiles["greenery"] += n
+        self._price(label, n * VP)
+        self.queue.append(("oxygen", n, f"oxygen step from that greenery{via}", via))
+
+    def _venus(self, n, label, via):
+        ctx, v = self.ctx, self.v
+        for _ in range(min(n, self.left["venus"])):
+            before, self.venus = self.venus, self.venus + 2
+            self.left["venus"] -= 1
+            self.steps["venus"] += 1
+            self._price(label, ctx.tr, tr=1)
+            label = label and f"bonus Venus step{via}"
+            if ctx.alt_venus:
+                if self.venus > 16:
+                    v.add(f"alternative Venus board: resource reward{via}", 2.0)
+            else:
+                if before < 8 <= self.venus:
+                    v.add(f"Venus reaches 8%: draw a card{via}", CARD)
+                if before < 16 <= self.venus:
+                    v.add(f"Venus reaches 16%: +1 TR{via}", ctx.tr)
+                    self.bonus_tr += 1
+                    v.tr += 1
+            if not self.left["venus"]:
+                self.last.append("venus")
+
+    # Planetary-track rewards that change the board go back into the queue instead of a flat price.
+    _CHAIN_REWARDS = {"venus_scale": "venus", "ocean": "ocean", "greenery": "greenery"}
+
+    def _track(self, payload, label, via):
+        track, n = payload
+        ctx, v = self.ctx, self.v
+        pos = self.tracks.get(track)
+        if pos is None or pos < 0:
+            return
+        layout = data.planetary_tracks().get(track, [])
         for step in range(pos + 1, min(pos + n, len(layout) - 1) + 1):
             space = layout[step]
-            mine = [r for r in space.get("risingPlayer", [])]
-            everyone = [r for r in space.get("everyone", [])]
+            mine, everyone = space.get("risingPlayer", []), space.get("everyone", [])
             if mine:
-                v.add(f"{track} track {step}: you get {', '.join(mine)}", sum(_reward_value(r, ctx) for r in mine))
-                if "venus_scale" in mine:
-                    v.raises["venus"] += 1
+                flat = [r for r in mine if r not in self._CHAIN_REWARDS]
+                label = f"{track} track {step}: you get {', '.join(mine)}"
+                v.add(label, sum(_reward_value(r, ctx) for r in flat))
+                for r in mine:
+                    if r in self._CHAIN_REWARDS:
+                        cause = f" (via {track} track {step})"
+                        self.queue.append((self._CHAIN_REWARDS[r], 1, f"{track} track {step}: you get {r}", cause))
+                if "tr" in flat:
+                    self.bonus_tr += flat.count("tr")
+                    v.tr += flat.count("tr")
             if everyone:
                 each = sum(_reward_value(r, ctx) for r in everyone)
                 v.add(f"{track} track {step}: everyone gets {', '.join(everyone)}", each)
                 v.flags.append(f"{track} track {step} also gives each rival {', '.join(everyone)} (≈{each:.0f} M€ each)")
             if space.get("mostTags"):
                 v.flags.append(f"{track} track reaches its end: most {track} tags scores {', '.join(space['mostTags'])}")
+        self.tracks[track] = pos + n
+
+    def finish(self):
+        ctx, v = self.ctx, self.v
+        v.sim = {**self.steps, **self.tiles}
+        if "temperature" in self.last:
+            holders = [f"{p['name']} ({p['heat']} heat)" for p in ctx.rivals if p["heat"] >= 8]
+            v.flags.append("takes the LAST temperature step" + (f": strands {', '.join(holders)}" if holders else ""))
+        if "oxygen" in self.last:
+            holders = [f"{p['name']} ({p['plants']} plants)" for p in ctx.rivals if p["plants"] >= 8]
+            v.flags.append("takes the LAST oxygen step" + (f": later greeneries give no TR ({', '.join(holders)} holding plants)" if holders else ""))
+        if "venus" in self.last:
+            v.flags.append("takes the LAST Venus step")
+        if "oceans" in self.last:
+            v.flags.append("places the LAST ocean: ends every ocean action and ocean card for the table")
+        if ctx.remaining_steps and not self.left["temperature"] and not self.left["oxygen"] and not self.left["oceans"] and \
+                (not ctx.venus_counts or not self.left["venus"]):
+            v.flags.append("COMPLETES TERRAFORMING: the game ends after this generation")
+        # Exploitation Of Venus pays whoever raises Venus, whoever owns it.
+        if self.steps["venus"]:
+            for p in ctx.players:
+                if any(c["name"] == "Exploitation Of Venus" for c in p.get("tableau", [])):
+                    who = "your" if p["color"] == ctx.me["color"] else f"{p['name']}'s"
+                    v.add(f"{who} Exploitation Of Venus pays you per Venus step", 2.0 * self.steps["venus"])
+        _own_triggers(v, ctx, self)
+
+
+# Your own cards that pay you when this card's effects happen. The app implements these payouts in
+# custom code, so behaviors.json only names the hook; the amounts here come from the card text.
+# event → what one occurrence pays: ("mc", n), a stock resource, "prod:<resource>", "card",
+# "here" (a resource on the trigger card itself) or "res:<Type>" (a resource on your best card of that type).
+OWN_TRIGGERS = {
+    "Homeostasis Bureau": [("temperature", [("mc", 3)], "+3 M€ per temperature step")],
+    "Venus Contract": [("venus", [("mc", 3)], "+3 M€ per Venus step")],
+    "Aphrodite": [("venus", [("mc", 2)], "+2 M€ per Venus step")],
+    "Terraforming Deal": [("tr", [("mc", 2)], "+2 M€ per TR")],
+    "United Nations Mission One": [("tr", [("mc", 1)], "+1 M€ per TR")],
+    "Arctic Algae": [("ocean", [("plants", 2)], "+2 plants per ocean")],
+    "Lakefront Resorts": [("ocean", [("prod:megacredits", 1)], "+1 M€ production per ocean")],
+    "Polaris": [("ocean", [("prod:megacredits", 1), ("mc", 4)], "+1 M€ production and 4 M€ per ocean")],
+    "PolderTECH Dutch": [("ocean", [("energy", 1)], "+1 energy per ocean"), ("greenery", [("plants", 1)], "+1 plant per greenery")],
+    "Herbivores": [("greenery", [("here", 1)], "+1 animal per greenery")],
+    "Gordon": [("greenery", [("mc", 2)], "+2 M€ per greenery"), ("city", [("mc", 2)], "+2 M€ per city")],
+    "Rover Construction": [("city", [("mc", 2)], "+2 M€ per city")],
+    "Tharsis Republic": [("city", [("prod:megacredits", 1), ("mc", 3)], "+1 M€ production and 3 M€ per city")],
+    "Immigrant City": [("city", [("prod:megacredits", 1)], "+1 M€ production per city")],
+    "Pets": [("city", [("here", 1)], "+1 animal per city")],
+    "Steelaris": [("city", [("steel", 1), ("plants", 1)], "+1 steel and 1 plant per city")],
+    "Interplanetary Cinematics": [("event", [("mc", 2)], "+2 M€ per event")],
+    "Media Group": [("event", [("mc", 3)], "+3 M€ per event")],
+    "Martian Insurance Group": [("event", [("prod:megacredits", 1)], "+1 M€ production per event")],
+    "Optimal Aerobraking": [("space_event", [("mc", 3), ("heat", 3)], "+3 M€ and 3 heat per space event")],
+    "Palladin Shipping": [("space_event", [("titanium", 1)], "+1 titanium per space event")],
+    "Point Luna": [("tag:earth", [("card", 1)], "draws a card per Earth tag")],
+    "Space Relay": [("card:jovian", [("card", 1)], "draws a card per Jovian card")],
+    "Ambient": [("card:venus", [("prod:heat", 1)], "+1 heat production per Venus card")],
+    "Robin Haulings": [("card:venus", [("res:Floater", 1)], "+1 floater per Venus card")],
+    "Microbiology Patents": [("card:microbe", [("prod:megacredits", 1)], "+1 M€ production per microbe card")],
+    "Advertising": [("cost20", [("prod:megacredits", 1)], "+1 M€ production for a 20+ M€ card")],
+    "CrediCor": [("cost20", [("mc", 4)], "+4 M€ for a 20+ M€ card or standard project")],
+    "Spin-off Department": [("cost20", [("card", 1)], "draws a card for a 20+ M€ card")],
+    "Sagitta Frontier Services": [("notags", [("mc", 4)], "+4 M€ for a card with no tags"),
+                                  ("onetag", [("mc", 1)], "+1 M€ for a card with one tag")],
+    "Standard Technology": [("standard_project", [("mc", 3)], "+3 M€ per standard project")],
+    "Venusian Animals": [("tag:science", [("here", 1)], "+1 animal per science tag")],
+    "Terraforming Robots": [("tag:mars", [("here", 1)], "+1 robot per Mars tag")],
+    "Martian Repository": [("tag:science", [("here", 1)], "+1 data per science tag"), ("tag:mars", [("here", 1)], "+1 data per Mars tag")],
+    "Martian Zoo": [("tag:earth", [("here", 1)], "+1 animal per Earth tag")],
+    "Decomposers": [("tag:bio", [("here", 1)], "+1 microbe per plant, animal or microbe tag")],
+    "Arklight": [("tag:plant", [("here", 1)], "+1 animal per plant tag"), ("tag:animal", [("here", 1)], "+1 animal per animal tag")],
+    "Ecological Zone": [("tag:plant", [("here", 1)], "+1 animal per plant tag"), ("tag:animal", [("here", 1)], "+1 animal per animal tag")],
+    "Viral Enhancers": [("tag:bio", [("plants", 1)], "+1 plant per plant, animal or microbe tag")],
+    "EcoTec": [("tag:bio", [("plants", 1)], "+1 plant per plant, animal or microbe tag")],
+    "GMO Contract": [("tag:bio", [("mc", 2)], "+2 M€ per plant, animal or microbe tag")],
+    "Soil Bacteria": [("tag:plant", [("plants", 1)], "+1 plant per plant tag"), ("tag:microbe", [("plants", 1)], "+1 plant per microbe tag")],
+    "Albedo Plants": [("tag:plant", [("heat", 3)], "+3 heat per plant tag")],
+}
+OWN_TRIGGERS["Ecological Zone:ares"] = OWN_TRIGGERS["Ecological Zone"]
+
+_NO_CARD_TRIGGERS = ("Convert Plants", "Convert Heat")
+
+
+def _trigger_counts(v, ctx, sim):
+    """How many times each OWN_TRIGGERS event happens when this card or project is used."""
+    info = v.info or {}
+    tags = v.persistent_tags + v.event_tags
+    project = info.get("type") in ("automated", "active", "event")
+    standard = v.name in STANDARD_BEHAVIORS and v.name not in _NO_CARD_TRIGGERS
+    base = info.get("cost") if project else (v.cost if standard else 0)
+    counts = {
+        "temperature": sim.steps["temperature"], "oxygen": sim.steps["oxygen"], "venus": sim.steps["venus"],
+        "ocean": sim.tiles["ocean"], "greenery": sim.tiles["greenery"], "city": sim.tiles["city"],
+        "tr": max(0.0, v.tr), "standard_project": 1 if standard else 0,
+        "cost20": 1 if (project or standard) and (base or 0) >= 20 else 0,
+    }
+    if project:
+        counts.update({
+            "event": 1 if info.get("type") == "event" else 0,
+            "space_event": 1 if info.get("type") == "event" and "space" in tags else 0,
+            "notags": 1 if not tags else 0, "onetag": 1 if len(tags) == 1 else 0,
+            "tag:bio": sum(tags.count(t) for t in ("plant", "animal", "microbe")),
+        })
+        for t in set(tags):
+            counts[f"tag:{t}"] = tags.count(t)
+            counts[f"card:{t}"] = 1
+    return counts
+
+
+def _payout(kind, n, owner, ctx):
+    if kind == "mc":
+        return n
+    if kind in ("plants", "heat", "steel", "titanium", "energy"):
+        return n * _unit(kind, ctx)
+    if kind.startswith("prod:"):
+        res = kind[5:]
+        return n * _unit(res, ctx) * (ctx.plant_phases if res == "plants" else ctx.phases)
+    if kind == "card":
+        return n * CARD
+    if kind == "here":
+        return n * _resource_vp_value(owner, ctx)
+    if kind.startswith("res:"):
+        return n * _best_target(ctx, kind[4:])[0]
+    return 0.0
+
+
+def _own_triggers(v, ctx, sim):
+    counts = _trigger_counts(v, ctx, sim)
+    for owner in ctx.tableau:
+        if owner == v.name:
+            continue
+        for event, pays, text in OWN_TRIGGERS.get(owner, []):
+            n = counts.get(event, 0)
+            if n:
+                v.add(f"your {owner}: {text} (×{n:g})", sum(_payout(k, amt * n, owner, ctx) for k, amt in pays))
 
 
 _MILESTONE_METRICS = {
@@ -841,8 +1065,9 @@ def _unlocks(v, ctx):
 
 
 def _rival_triggers(v, ctx):
-    hits = {"venus": v.raises["venus"] > 0, "colony": v.colonies > 0, "greenery": v.tiles["greenery"] > 0,
-            "city": v.tiles["city"] > 0, "ocean": v.tiles["ocean"] > 0,
+    sim = getattr(v, "sim", None) or {}
+    hits = {"venus": sim.get("venus", 0) > 0, "colony": v.colonies > 0, "greenery": sim.get("greenery", 0) > 0,
+            "city": sim.get("city", 0) > 0, "ocean": sim.get("ocean", 0) > 0,
             "jovian": "jovian" in v.persistent_tags + v.event_tags,
             "microbe": "microbe" in v.persistent_tags + v.event_tags}
     for p in ctx.players:
@@ -850,9 +1075,8 @@ def _rival_triggers(v, ctx):
             trig = ANY_PLAYER_TRIGGERS.get(card["name"])
             if trig and hits.get(trig[0]):
                 who = "your" if p["color"] == ctx.me["color"] else f"{p['name']}'s"
-                if card["name"] == "Exploitation Of Venus":
-                    steps = min(v.raises["venus"], ctx.left["venus"])
-                    v.add(f"{who} Exploitation Of Venus pays you per Venus step", 2.0 * steps)
+                # Priced in _Sim.finish (Exploitation) and _own_triggers (your own cards).
+                if card["name"] == "Exploitation Of Venus" or (who == "your" and card["name"] in OWN_TRIGGERS):
                     continue
                 v.flags.append(f"triggers {who} {card['name']}: {trig[1]}")
             elif p["color"] != ctx.me["color"]:
