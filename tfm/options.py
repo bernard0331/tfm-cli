@@ -246,20 +246,38 @@ def describe_space(sid, ctx):
         parts.append("bonus " + ",".join(data.bonus_name(b) for b in space["bonus"]))
     if space.get("undergroundResource"):
         parts.append(f"underground {space['undergroundResource']}")
+    steps = _hazard_steps(space)
+    if steps:
+        # Ares: a tile placed on a hazard pays 8 M€ per severity step and removes it for that many TR.
+        parts.append(f"ON {data.tile_name(space['tileType'])}: costs {8 * steps} M€ extra, +{steps} TR")
     adj = []
     empty = 0
+    lose = 0
     for aid in data.adjacency(ctx.board_name, sid):
         a = ctx.spaces.get(aid, {})
         if a.get("tileType") is None:
             empty += 1
             continue
+        lose += _hazard_steps(a)
         owner = a.get("color")
         who = "your" if owner == ctx.me["color"] else ctx.names.get(owner, "") if owner else ""
         adj.append(f"{who} {data.tile_name(a['tileType'])}".strip())
     if adj:
         parts.append("adj: " + ", ".join(adj))
+    if lose:
+        # Each adjacent hazard costs production: 1 step for mild, 2 of one type for severe.
+        parts.append(f"next to hazard: lose {lose} production")
     parts.append(f"{empty} empty adj")
     return " · ".join(parts)
+
+
+def _hazard_steps(space):
+    if space.get("tileType") is None or space.get("color"):
+        return 0
+    name = data.tile_name(space["tileType"])
+    if not name.endswith(("Dust Storm", "Erosion")):
+        return 0
+    return 2 if name.startswith("Severe") else 1
 
 
 def describe_colony(col, ctx):

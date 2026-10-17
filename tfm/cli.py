@@ -7,6 +7,7 @@ Built so that AI agents with shell access can play a seat with few tokens:
 """
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -409,6 +410,9 @@ def main(argv=None):
     p.set_defaults(fn=cmd_new_game)
 
     args = parser.parse_args(argv)
+    # A reader that stops early (`tfm play ... | head`) must not abort the command before the seat
+    # is saved, or the next `play` is refused as stale.
+    real_out, sys.stdout = sys.stdout, _PipeSafe(sys.stdout)
     transcript = _transcript_path(args)
     if transcript:
         real, sys.stdout = sys.stdout, _Tee(sys.stdout, transcript, argv if argv is not None else sys.argv[1:])
@@ -423,6 +427,7 @@ def main(argv=None):
         if transcript:
             sys.stdout.close()
             sys.stdout = real
+        sys.stdout = real_out
 
 
 def _transcript_path(args):
@@ -450,6 +455,36 @@ class _Tee:
 
     def close(self):
         self.file.close()
+
+
+class _PipeSafe:
+    """stdout that drops output once the reader has gone, instead of raising BrokenPipeError."""
+
+    def __init__(self, out):
+        self.out, self.broken = out, False
+
+    def write(self, text):
+        if not self.broken:
+            try:
+                self.out.write(text)
+            except BrokenPipeError:
+                self._detach()
+        return len(text)
+
+    def flush(self):
+        if not self.broken:
+            try:
+                self.out.flush()
+            except BrokenPipeError:
+                self._detach()
+
+    def _detach(self):
+        # Point the real descriptor at /dev/null so the interpreter's final flush stays quiet.
+        self.broken = True
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), self.out.fileno())
+        except (OSError, ValueError, AttributeError):
+            pass
 
 
 if __name__ == "__main__":

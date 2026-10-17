@@ -108,8 +108,9 @@ class Outlook:
         self.pace = self._pace(g.get("globalsPerGeneration") or [])
         by_pace = 1 if remaining == 0 else max(1, math.ceil(remaining / self.pace))
         # Early pace understates how fast tables finish (terraforming accelerates), so also cap the
-        # estimate at a typical game length for this player count and setup.
-        typical = {1: 14, 2: 12, 3: 11}.get(len(self.players), 10) - (1 if self.expansions.get("prelude") else 0)
+        # estimate at a typical game length for this player count and setup. Our 4-player games with
+        # Prelude ended in generation 8 and our 5-player ones in generation 7.
+        typical = {1: 14, 2: 12, 3: 11, 4: 9}.get(len(self.players), 8) - (1 if self.expansions.get("prelude") else 0)
         by_length = max(1, typical - self.generation + 1)
         self.gens_left = gens_left if gens_left is not None else min(by_pace, by_length)
         self.by_pace, self.by_length = by_pace, by_length
@@ -120,7 +121,9 @@ class Outlook:
         self.plant_phases = self.gens_left  # final plants still become a greenery
         self.remaining_steps = remaining
         # 8 heat = 1 temperature TR; 8 plants = a greenery (1 VP, plus 1 oxygen TR while oxygen is open).
-        self.heat = self.tr / 8 if self.left["temperature"] else 0.0
+        # Ambient keeps turning 8 heat into 1 TR after temperature is maxed.
+        ambient = any(c["name"] == "Ambient" for c in self.me.get("tableau") or [])
+        self.heat = self.tr / 8 if self.left["temperature"] or ambient else 0.0
         self.plant = (VP + self.tr) / 8 if self.left["oxygen"] else VP / 8
         self.steel = float(self.me.get("steelValue", 2))
         self.titanium = float(self.me.get("titaniumValue", 3))

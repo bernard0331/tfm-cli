@@ -1,8 +1,8 @@
 # Terraforming Mars: strategy and rules context for agents
 
 Context for an AI agent playing a seat with `tfm` (see [AGENT_INSTRUCTIONS.md](../AGENT_INSTRUCTIONS.md)):
-a strategic framework, rules that commonly trip players up, expansion notes, and lessons from past
-games. Read it once at the start of a game, not every turn.
+a strategic framework, rules that commonly trip players up and expansion notes. Read it once at the
+start of a game, not every turn.
 
 It is **not** a card database or proof of optimal play. When a card interaction is unusual, the exact
 card text (`tfm card "<name>"`), the live game settings and the choices `tfm` offers decide. Never carry
@@ -17,6 +17,9 @@ resources, coordinates or plans over from a previous game.
 2. Track stock and production separately. Note which card actions you've used and which fleets are free.
 3. Estimate how many generations are left from **every** player's ability to finish the global
    parameters, and switch from buying production to buying points about two generations before the end.
+   Most 4–5 player games are typically 7–8 generations long, but depending on the strategy players are
+   employing this can vary slightly. As the game plays out, estimate the generations left yourself from
+   the board and pass the result to `tfm value --gens N`.
 4. After every card or tile, recheck **all** unclaimed milestones, not just the ones you were aiming for.
 5. Keep cash in reserve for a milestone claim, an award fee or a contested opportunity before spending
    on optional development.
@@ -41,8 +44,8 @@ Keep two projections:
   one after? Break it into TR, milestones, awards, greeneries, cities, card and resource points,
   expansion points and penalties. `tfm` prints your VP breakdown every turn.
 
-A weak category is fine if another route makes up for it. In recorded games the highest TR at the table
-finished last, and the lowest TR finished second twice. For any candidate action, ask:
+A weak category is fine if another route makes up for it; the highest TR at the table doesn't
+necessarily win. For any candidate action, ask:
 
 > What does this add to my likely final score, what does it enable, what does it give or deny the
 > strongest rival, and what better action does its cost rule out?
@@ -135,32 +138,21 @@ and cash to claim, access to trades and placements, flexibility if a rival takes
 credible path to points at the table's pace.
 
 A corporation whose effect fires on **any** player's action is often stronger than one that only
-rewards your own plays. Poseidon (+1 M€ production per colony anyone places) reached +11 and +19 M€
-production in two games; Aphrodite plus a second card paying for Venus steps returned 52 M€. Check the
-opposite case too: a corporation action needing a resource you won't produce may never fire.
+rewards your own plays, and it grows with the table. Check the opposite case too: a corporation action
+needing a resource you won't produce may never fire.
 
-Add up the package's M€ production before choosing. Aerotech with Supplier and Mohole Excavation started
-at +0 M€ and was only +3 to +4 through generation 6. Its titanium (one per card not bought) had few
-space cards to pay for and went on 3-titanium trades. A corporation that pays in a resource is only as
-good as your use for that resource.
+Look for milestones the opening package alone can reach: a corporation, prelude and starting card can
+sometimes qualify on the first action turn.
 
-TR preludes don't fix a corporation with no income. Inventrix with UNMI Contractor and Great Aquifer
-opened at TR 25 but +0 M€ production, +2 to +3 until generation 6. That player sold cards to afford a
-milestone claim, never built a city, and finished 4th, tied for the highest TR.
-
-A corporation paid by one global parameter depends on how fast the table moves it. Lakefront Resorts
-(+1 M€ production per ocean) reached +11 M€ by generation 2 when oceans finished in generation 2. In a
-game where oceans stood at 1 of 9 in generation 3, it added little until late. Prelude oceans and
-early Aquifers (TR plus income plus 3 M€ per adjacent ocean) are what make it pay.
-
-A corporation that raises the price of buying cards (Polyphemos: 5 M€ instead of 3) taxes every
-research phase, not just the opening. Its +5 M€ production and 50 M€ start still led to buying only 1–2
-cards a generation, a thin hand and a first Mars tile in generation 6. Pair it with preludes that put
-tiles down or give a steady supply of plays.
+Add up the package's M€ production before choosing. A package that starts near +0 M€ stays poor for a
+long time, and TR from preludes doesn't replace income. A corporation that pays in a resource is only as
+good as your use for that resource, and one that raises the price of buying cards taxes every research
+phase, not just the opening. A corporation paid per step of one global parameter depends on how fast the
+table moves that parameter; prelude and early standard-project steps on it are what make it pay.
 
 Preludes that give early resources can unlock a sequence production alone can't pay for, but cash that
-buys nothing useful can be worse than lasting production. A prelude placing a colony with a double
-bonus on an ocean-placing tile gave two oceans (2 TR plus placement bonuses) in generation 1.
+buys nothing useful can be worse than lasting production. Look for prelude and colony combinations whose
+placement bonuses chain into extra steps.
 
 Keep starting cards you can realistically play. Don't leave your corporation unable to act in
 generation 1. Cards whose value grows with the generation number (e.g. Flat Mars Theory) are worth
@@ -180,9 +172,13 @@ is both likely to use the card and would gain a lot; don't pay 3 M€ to keep a 
 - How many useful activations or production phases are left?
 - What resource, tag, requirement or board condition does it need? For placement restrictions
   (volcanic spaces, spaces next to two oceans), check that a legal space exists and will stay free.
-  A card that lowers your energy production can't be played with 0 energy production. One player
-  drafted four such cards (Rad-Chem Factory, Shuttles, Freyja Biodomes, Building Industries) and played none.
+  A card that lowers your energy production can't be played with 0 energy production.
 - What other purchase or action does it displace?
+- Is its main effect still available? A card whose parameter is already maxed is worth only its
+  printed VP and tags.
+
+**Only draft what you'll buy.** Take the card you can afford and play in the time left over a better
+card you can't. Cards that sit unplayed in hand are 3 M€ each thrown away.
 
 Judge the **whole purchase** against your action-phase budget: three reasonable cards can together block
 a milestone claim or an award fee. A card in hand is a sunk cost; selling it can be right when the
@@ -213,7 +209,8 @@ breaks even with about 3–4 phases left: better earlier, worse later.
 
 **Card test:** compare total value (VP × 5 + TR × that rate + resources + production) with `cost + 3`.
 Preludes and corporations have no purchase price. `tfm value` applies these rates for its estimate of
-the generations left (shown on its OUTLOOK line; override with `--gens`) and flags many hidden effects.
+the generations left (shown on its OUTLOOK line; override with `--gens`) and flags many hidden effects. When a card's value has a `? custom code` line, work out the real effect yourself: the estimate can be
+far off.
 
 Standard projects are usually worse than these rates (Asteroid: 14 M€ for 1 TR, which only breaks even
 with 9 phases left; Greenery: 23 M€ for 1 VP + 1 TR, i.e. 10 M€ + 1 M€ per remaining phase).
@@ -238,28 +235,25 @@ can matter more than several that stay stranded. Count only **spendable** produc
 the discounts you will actually use. For repeatable actions, count the affordable, useful uses left.
 
 When a rival has a stealing action, spend card resources as soon as they reach a threshold, or block
-the attack with corruption. In one game Ants took microbes three times (a fourth was blocked), costing about one TR and a VP.
+the attack with corruption.
 
 ### Hidden value: what a card triggers, enables, counts toward and denies
 
 Before buying or ranking a card, ask:
 
-- **Who will trigger it?** An effect fed by every player grows with the table. A card gaining plant
-  production whenever *anyone* placed a greenery reached +9; Zeppelins paid +5 M€ from rivals' cities.
+- **Who will trigger it?** An effect fed by every player grows with the table.
 - **What does it unlock?** A cheap card that completes a threshold, meets a requirement or finds a key
   card can beat an expensive one.
 - **Does it add an action?** A free trade, a fleet reuse, or returning events to hand is an extra action.
 - **What does it feed?** Cards that put animals, microbes or data onto other cards score through their
   targets.
 - **Which tags does it bring?** Count every requirement, milestone, award, planetary track and
-  per-tag payout it moves. Terraforming Ganymede (TR per Jovian tag) gave 5 TR after cheap Jovian cards
-  were played first.
+  per-tag payout it moves. A per-tag payout is worth more after cheap cards with that tag are down, and
+  a "VP per tag" card makes every later card with that tag worth more.
 - **Does it count for an award?** Cheap cards can decide a count-based award late in the game.
-- **What does it deny?** A 1 M€ card that removed 2 animal VP from the eventual winner equalled the
-  winning margin.
+- **What does it deny?** A cheap card that removes points from the leader can swing a close game.
 - **Does it cross a bonus threshold?** Global parameters and Pathfinders tracks pay extra at fixed steps
-  (oxygen 8% raises temperature; 0°C places an ocean). Follow the chain: one 13 M€ plant event set off
-  about five TR, three greeneries and 12 M€ of ocean income.
+  (oxygen 8% raises temperature; 0°C places an ocean). Follow the chain: one step can set off several.
 - **Is cash now worth more than cash later?** Money for a contested action this turn (an ocean while
   oceans remain) beats the same money next generation.
 - **What is the payment really worth?** A card paid mostly with otherwise dead titanium is cheaper than
@@ -283,58 +277,43 @@ scarce metal you need for an action with no cash alternative.
 ### Milestones: check every turn
 
 `tfm` lists every milestone with your score, the best rival's, and `<<< YOU CAN CLAIM` when you qualify.
-Recheck after **every** play that changes tags, production, TR, hand size, colonies or tiles: one player
-qualified on the spot and never noticed.
+Recheck after **every** play that changes tags, production, TR, hand size, colonies or tiles: it's easy
+to qualify on the spot and not notice.
 
-Milestones go early. In four-player games all three were gone by generation 5, the first sometimes in
-generation 1. By generation 2 or 3, pick the milestone you will race and play the cards that move it
-first. In a race, count rivals' tiles and tags every turn and save the cost of the last tile plus the
-8 M€ claim before anything optional; one Mayor race was lost by a single action after 9 M€ went on a minor
-trade. Qualifying is not scoring: claim a contested milestone as soon as you can.
-
-**Minimalist (2 cards or fewer in hand) can be claimed with the first action of generation 1.** Buy at
-most 2 starting cards, pick preludes that draw no cards, and claim before playing anything else. As
-first player, one seat took 5 VP for 8 M€ this way while a rival with an empty hand was still behind it in turn order.
+Milestones go early, often all three within the first half of the game. By generation 2 or 3, pick the
+milestone you will race and play the cards that move it first. In a race, count rivals' tiles and tags
+every turn and save the cost of the last tile plus the 8 M€ claim before anything optional. Qualifying is
+not scoring: claim a contested milestone as soon as you can.
 
 ### Awards: project the finish
 
 Before funding, estimate your final score on the award and each serious rival's reachable score.
 
 - **Fund counts your engine keeps raising** (production, cards played, tiles), not stock you will spend.
-  Banker funded in generation 1 on a 6-to-2 lead and Innovator funded in generation 8 and padded with
-  cheap cards won a game; an Industrialist lead built on steel stock vanished when the steel was spent.
-- **A thin lead in a count anyone can raise cheaply is weak.** Players have funded awards they led and
-  scored nothing after rivals overtook them, once by padding a cheap card type late.
-  Before funding, read each rival's played cards for ones that raise the count by themselves. One
-  player funded Botanist on a 3-to-2 plant-production lead and Biologist on 8 to 6, partly to claim
-  Gambler. A rival's Botanical Experience (+1 plant production per 3 data), plus Worms and late
-  animal cards, overtook both, and that rival won with 15 award VP, 10 of them from awards someone else paid for.
-- **Don't pass first on a one-card lead in a card-count award.** One player led 2nd place in Innovator
-  19 to 18 in the final generation, then passed with cheap cards still unplayable. Rivals still acting
-  padded past them, and the player finished with 0 award VP. Keep a cheap card to play as your last action, or pass after the rivals.
-- **Don't wait too long on a wide lead.** One player led an award 7 tiles to 2 and never funded it;
-  another led 16 to 4 but had 3 M€ when the last slot was open. Both scored 0. While a slot is open and
-  you hold a lead rivals can't close, keep the fee in reserve.
-- **Award slots run out as fast as milestones.** In one four-player game all three awards were funded by
-  generation 5, while one player was tied 7–7 on one award and led another 6–5. They funded neither
-  and finished with 0 award and 0 milestone VP. If you lead nothing you can protect by generation 4,
-  plan your points elsewhere instead of waiting for a slot.
+  A lead built on stock vanishes when the stock is spent.
+- **A thin lead in a count anyone can raise cheaply is weak.** Rivals can overtake it late, for example
+  by padding a cheap card type. Before funding, read each rival's played cards for ones that raise the
+  count by themselves.
+- **Fund an award on something nobody else is collecting,** early while it's cheap, then keep drafting
+  for it.
+- **Don't pass first on a narrow lead in a card-count award.** Rivals still acting can pad past you.
+  Keep a cheap card to play as your last action, or pass after them.
+- **A resource-count award against a rival with a stealing card is weaker than it looks:** each steal
+  moves the gap by 2. Count every possible steal before you spend resources the award counts.
+- **Before funding a board award,** count each rival's open city sites next to greeneries or oceans
+  that they could fill in the last generation.
+- **Don't wait too long on a wide lead.** An unfunded lead scores nothing. While a slot is open and you
+  hold a lead rivals can't close, keep the fee in reserve.
+- **Award slots run out as fast as milestones.** If you lead nothing you can protect by mid-game, plan
+  your points elsewhere instead of waiting for a slot.
 - Letting a rival fund an award you will win can be better than paying for it yourself; funding early
   locks the cheaper slot. Re-check standings before spending resources an award counts.
-- **An award that counts stock you'd otherwise spend has a running cost.** Holding heat for Thermalist
-  meant not converting it while temperature was still open, about 2–3 TR given up. A rival then raised
-  heat production from +7 to +12 in the last two generations and nearly took the award. Re-project each
-  rival's final stock from their production every generation. A production attack can hold the lead
-  (Heat Trappers took 2 heat production from them), and play your own card that lowers that production
-  only after the rival has passed.
-- **A resource-count award against a rival with a stealing card (Ants, Predators) is weaker than it
-  looks.** Each steal moves the gap by 2. One player funded A. Zoologist leading 5 to 2 against a rival with Ants; that rival added
-  4 microbes the same generation and kept stealing, and later converting 3 microbes for 1 TR dropped
-  the funder from 2nd to 3rd (−2 VP for +1 TR). In the final generation, count every rival's possible steal
-  before you spend resources the award counts.
-  Count a rival's energy stock as heat too: it becomes heat at the next production phase. A 25-to-16
-  Thermalist lead in generation 6 ended as a 31-to-34 loss, partly because the rival built +4 energy
-  production two generations before the end.
+- **An award that counts stock you'd otherwise spend has a running cost.** Holding heat for a heat
+  award means not converting it while temperature is still open. Re-project each rival's final stock
+  from their production every generation, and count a rival's energy as heat too: it becomes heat at the
+  next production phase. A production attack can protect a lead; play it only after the rival has passed.
+- **Don't fund a tie in a count a rival with more cash can raise.** The fee can end up buying the rival
+  first place.
 
 ---
 
@@ -349,34 +328,30 @@ neighbours; `tfm board` shows every tile.
 
 A city next to several greeneries is efficient points and denial; one surrounded by spaces you can't
 fill is weak. Greeneries next to a rival's city can still be worth it, but count the points you give
-away. Identify open city sites beside your greeneries before spending your last cash: one rival built
-there after the owner passed and won by one point.
+away. Identify open city sites beside your greeneries before spending your last cash: a rival can
+build there after you pass.
 
 A card that turns one of your greeneries into a city (Kaguya Tech) changes your score by: −1 for the
-greenery, −1 for each city next to it, +1 for each greenery next to the new city. Converting a
-greenery between two cities can lose points; one touching three greeneries and one city gained 1 VP
-net for 8 M€, plus its placement bonus again.
+greenery, −1 for each city next to it, +1 for each greenery next to the new city. Count before
+converting: a greenery between two cities can lose points.
 
-**Get on-map tiles down early.** Players whose first city or greenery came in generation 6 or later
-scored 5–8 board points against 10–21 for the others.
+**Get on-map tiles down early.** A ground game started late leaves few good spaces and few board points.
 
 ### Ending versus extending
 
 Track the slowest global parameter, and watch rivals' cash for standard projects as well as their
 production. When two parameters are close to finished, a burst of greeneries and oceans can finish them
-in one generation: in one game oxygen and oceans both finished in generation 8, two generations earlier
-than the pace suggested. Switch to points then, not when an estimate says so. Maxing temperature doesn't
+in one generation, earlier than the pace suggests. Switch to points then, not when an estimate says so. Forecast each parameter separately from rivals' corporations and production: specialists can close
+one parameter early, and cards that raise it lose their value when they do. Maxing temperature doesn't
 end the game, but immediately makes heat nearly worthless.
-
-Forecast each parameter separately from rivals' corporations and production in generations 1–2, not
-only the total. With three Venus and heat corporations at a five-player table (Ambient, Morning Star,
-Chimera), Venus was maxed in generation 3 and temperature in generation 5, and the game ended in
-generation 7. A temperature action card (Directed Impactors) and a Venus-raising card bought in
-generations 1–3 lost most of their value. Discount cards that raise a parameter specialists will close.
 
 Estimate what one more generation is worth to you and to your strongest rival. If they gain more from
 repeated scoring actions, speeding up the end can be right; if you gain more, don't close the last
 parameter unless the immediate points make up for it.
+
+At 4–5 players, holding back one step rarely extends the game: anyone else with heat or plants closes
+it, and the TR you held back is lost. Unless you hold the only realistic way to finish a parameter, take
+your step.
 
 ---
 
@@ -391,21 +366,17 @@ the tile (you included only if you own one there).
 
 Judge a trade by its usable reward minus the real cost of what you paid with; titanium or energy with no
 other use is cheap. A colony is worth its placement reward plus owner bonuses that rivals will actually
-trigger. Read community colonies' current app text: Titania gave 5 VP for the first colony and 3 for
-the second, so a 17 M€ colony beat a 23 M€ greenery late in the game.
-
-Cheap card resources become TR through cards that convert them. Enceladus trades (3 microbes for
-9 M€ with your own colony there) fed GHG Producing Bacteria (2 microbes → 1 temperature step) and
-Nitrite Reducing Bacteria (3 → 1 TR). With Project Inspection repeating the action once, these gave
-about 8 TR from generation 4 to 7. At a table that excavated every turn, Mining Market Insider (5 M€)
-drew a free card about every two generations.
+trigger. Read community colonies' current app text: some give VP for building there, which can beat a
+greenery late in the game.
 
 A Mercury trade gives production of the type under its track marker, and that type changes as the
-marker moves: the same player got heat production from one trade and titanium production from a later
-one. Check the current type before trading for a specific production.
+marker moves. Check the current type before trading for a specific production.
+
+Cheap card resources from trades can become TR through cards that convert them (microbes into
+temperature or TR, for example). Look for a trade that supplies a converter you already own.
 
 A **Terra** trade raises the global parameter "as World Government": the trader gets **no TR** and
-nothing else (it only speeds the game end and pays any colony owners). A 9 M€ Terra trade made expecting 1 TR returned nothing.
+nothing else. It only speeds the game end and pays any colony owners.
 
 ### Ares
 
@@ -415,17 +386,17 @@ You can place a tile next to one or **on top of** it:
 | Hazard | Place next to it | Place on top of it |
 |---|---|---|
 | Mild | Lose 1 production of your choice | Pay 8 M€, gain 1 TR |
-| Severe | Lose 2 production of your choice (can be split 1 + 1) | Pay 16 M€, gain 2 TR |
+| Severe | Lose 2 units of one production of your choice | Pay 16 M€, gain 2 TR |
 
 Bonus tiles pay whoever places next to them and their owner. An animal placement bonus is lost if you have no animal card in
 play. Ocean upgrades don't place a new ocean or give ocean TR. Treat each placement as a complete
 transaction.
 
-A tile with a placement restriction may have only one legal space. Lava Flows (volcanic spaces only)
-could go only next to a Severe Erosion, which cost 2 production on top of the card's 16 M€. Before
-buying such a card, check its legal spaces for hazards. When the hazard's own space is legal, compare covering it
+A tile with a placement restriction may have only one legal space, and it may be next to a hazard.
+Before buying such a card, check its legal spaces for hazards. When the hazard's own space is legal, compare covering it
 (fee, plus TR) with building next to it (production lost). In the final generation that production loss
-costs almost nothing. `tfm`'s space list may not mark a hazard on the space itself, so check `tfm board`.
+costs almost nothing. `tfm`'s space list shows a hazard on the space itself (`ON Mild Erosion: costs
+8 M€ extra, +1 TR`) and the production lost to hazards next to it (`next to hazard: lose N production`).
 
 ### Pathfinders
 
@@ -441,29 +412,29 @@ excavation marker isn't a surface tile: no ocean adjacency, no greenery or city 
 tile removes the token beneath it. Compare a blind dig with a concrete alternative; a known token that
 completes a threshold is easier to value.
 
-Excavation can be an opening engine. One player used the Excavate standard project several times in
-generations 1–2 on identified tokens (an ocean, energy, plant production, TR). They claimed Tunneler in
-generation 2 and Tradesman in generation 3, then won the game. Cards that dig while ignoring placement
-rules (Orbital Laser Drill) can take a known production token anywhere: one dig gave +1 titanium
-production and another +2 heat production in generation 2.
+Excavation can be an opening engine: repeated digs on identified tokens can pay for themselves and
+move dig-related milestones early. Cards that dig while ignoring placement rules can take a known
+production token anywhere. Some tokens last only for the current generation, so use their effect right away. The Excavate
+standard project shows its spaces only after you pay: check the identified tokens next to your tiles
+(`tfm value` lists them) before paying.
 
 Corruption has two uses. It blocks qualifying attacks (damage or theft) against you, and at the end of
 the game each corruption you still hold cancels 1 VP of negative card points (shown as "Underworld
-Corruption Bribe" in the breakdown). So value corruption by your negative-VP cards: one player's 3
-corruption recovered 3 of their 4 negative VP, while a rival with −2 VP and no corruption kept the full
-penalty. Corruption beyond your negative card VP is only worth its blocking use. Before paying for an
+Corruption Bribe" in the breakdown). So value corruption by your negative-VP cards. Corruption beyond
+your negative card VP is only worth its blocking use. Before paying for an
 attack, check whether the target can block it or halve the loss. Some printed rules aren't implemented
 in the app.
 
-Holding corruption, or crime tags, has costs too. Class-action Lawsuit made the player with the most
-corruption drop 7 of it and lose 21 M€. Global Audit (2 M€) gave +2 TR to each player with no crime tags.
-
-Some cards spend corruption for points. Exploitation of Venus (6 M€) turns 1 corruption per generation
-into a Venus step plus 2 M€; fed by corruption tokens dug next to your tiles, it gave 5 TR over the
-game. In the app, Chemical Factory's action excavated but gave no corruption, so don't count on it as a
-supply.
+Holding corruption, or crime tags, has costs too: some cards punish the player with the most
+corruption, or reward players with no crime tags. Other cards spend corruption for points, which makes
+corruption from digs worth more. In the app, Chemical Factory's action excavates but gives no
+corruption, so don't count on it as a supply.
 
 ### Venus
+
+Venus can max out very early with several Venus players and big Venus events, and cards bought for the
+steps lose their value at once. With several Venus players, price a Venus-raising action only on the
+steps you can take in the next generation or two; Venus *tags* keep their value.
 
 Check whether Venus must be completed to end the game. Air Scrapping gets 1 M€ off per persistent Venus
 tag (up to 5); on the alternative board each step beyond 16% also gives a chosen resource, and the 30%
@@ -485,7 +456,9 @@ When the game may end this generation, stop engine planning and compare concrete
 1. List points available now: TR still gainable, card VP, resource-card thresholds, cities, greeneries,
    colony or track rewards, awards.
 2. Project final plants (stock + production + placement rewards). Count complete greeneries.
-3. Take contested opportunities first: milestone claims, city sites, trade slots, the last parameter steps.
+3. Take contested opportunities first: milestone claims, city sites, trade slots, the last parameter
+   steps. Read your own cards' side effects before playing them (convert plants before a card that
+   removes your plants).
 4. Use worthwhile once-per-generation actions, including free trades for card resources.
 5. Sell dead cards when the proceeds enable a better action.
 6. Spend leftover cash on standard projects that still score: Air Scrapping while Venus is open, a
@@ -498,91 +471,13 @@ have bought points deserves scrutiny.
 
 ---
 
-## 11. Lessons from past games
+## 11. Turn routine with `tfm`
 
-Nine seat reports from six four- and five-player games with all §9 expansions except Turmoil and Moon,
-clock penalty on. The lessons are folded into the sections above; the results show which categories
-decided games.
+At the start of each generation, before the draft:
 
-| Result | TR | What decided it |
-|---|---:|---|
-| Win, 85–84 | — | Early economy (Allied Bank copied by Double Down, +8 M€ production), three early milestones, colonies, award timing and fleet reuse |
-| Win, 84–82 | 45 (highest) | Poseidon to +19 M€ production; Banker (generation 1) and Innovator (generation 8) for 10 award VP; TR from late bursts. Despite 0 milestones and 8 board points |
-| 2nd, 82 vs 84 | 32 (lowest) | Best board (21) and two milestones, but its only award lead was steel stock that got spent |
-| 4th, 75 vs 84 | 35 | Couldn't pay the last award fee while leading Industrialist 16 to 4; lost Mayor by one action; production bought after the pace accelerated |
-| 4th, 70 vs 97 | 40 | Biggest income (+38 M€) but kept buying production to the end; first city off-map; no greenery until the last generation |
-| 4th, 63 vs 93 | 44 (highest) | 0 city points, a missed claimable milestone, a funded award lost, heat production after temperature was maxed, −4 clock penalty |
-| =3rd, 65 vs 94 | 32 (lowest) | Most award VP (10, Thermalist and Scientist) and most card VP, but 1 board point against the winner's 23. M€ production stayed at 0 until generation 6, in a game where oceans finished in generation 4 and everything finished in generation 8 |
-| =3rd, 65 vs 94 (same game) | 40 | 0 milestone and 0 award VP: every slot was gone by generation 5. Opened at +0 M€ production; first greenery in generation 5, 10 board points. A late burst (4 greeneries, 2 cities, last temperature step) in generations 6–8 reached 3 VP short of 2nd |
-| 2nd, 68 vs 94 (same game) | 42 | TR almost matched the winner's, but 0 milestones (all gone by generation 4) and 5 board points against 23: first Mars tile in generation 6. Kingpin held by one crime tag; led Thermalist until a rival's energy and Heat Trappers took it in the last generation |
-
-| 4th, 63 vs 90 | 41 (=highest) | Two milestones (Diversifier, Ecologist) but +0 M€ opening, 0 city points, 8 card VP against the winner's 33. Lost Innovator 2nd place after passing on a 19–18 lead; the game ended in generation 7 |
-| 3rd, 62 vs 64 | 42 | UNMI corp, Minimalist claimed in generation 1, 5 TR from Aquifer Pumping and Water Splitting Plant. Lost by 2: 0 city points (winner 3), 4 card VP against 12–13, and fell from 2nd to 3rd on A. Zoologist after a rival's Ants steal. A 4-player game with a +23 heat-production rival ended in generation 6 |
-| 4th, 74 vs 94 | 36 | Hadesphere with Vital Colony on Titania (placement bonus twice = 10 VP in generation 1) and 17 board points, but 0 milestones (all gone by generation 5) against the winner's 10 milestone + 10 award VP. Funded Urbanist on a 2–0 lead and finished 2nd, 10 to 11 |
-| Win, 94–86 | 46 (highest) | Morning Star with Great Aquifer + Double Down (4 oceans). Cheap Venus/Earth production cards gave +10 M€ in generation 1, so Specialist was claimed in generation 2 and T. Spacefarer in generation 4. Funded Venuphile (8 M€, generation 2) and Curator on Venus tags for 10 award VP. Final generation: last two temperature steps, then Air Scrapping ×4 |
-| 3rd, 81 vs 94 (same game) | 40 | Lakefront Resorts to +13 M€ production by generation 3; Legend claimed in generation 5; 25 card VP (most at the table) from Jovian multipliers and Security Fleet. But 0 award VP (never funded) and first Mars tile only in generation 5 |
-
-Lessons from the 94–86 win (Morning Star, 4 players, game ended in generation 8):
-
-- **A production milestone can come from your corporation's cheap tag cards.** Venus Governor (free
-  with 2 Venus tags), Immigration Shuttles and Sister Planet Support took M€ production from +0 to
-  +10 in generation 1, so Specialist cost one action in generation 2. For T. Spacefarer, a 1 M€ space
-  card (Soil Export, −1 VP) was the sixth tag and won the race against a PhoboLog rival sitting on 4.
-- **Fund an award on a tag type nobody else is collecting, early and cheaply, then keep drafting it.**
-  Venuphile was funded at 8 M€ on a 5-to-0 lead and finished 15 to 1. Curator was funded at 20 M€ on
-  12 Venus tags against 9 building tags; Venus cards drafted later (and one building card taken away
-  from the rival) kept it at 15 to 13. Both funds together returned 10 VP.
-- **Final generation: read your own card's side effects, and take contested steps first.** Solar Storm
-  removed 2 of my own plants (convert to a greenery *before* playing it). The last two temperature steps
-  went first (Solar Storm, then Asteroid), because rivals had the heat to take them. Leftover cash then
-  went on Air Scrapping at 10 M€ per TR, cheaper than a 23 M€ greenery. A Maxwell Base action that adds
-  a resource to "another Venus card" can put a VP habitat straight onto Floater-Urbanism.
-
-Lessons from the 74-point 4th place in the same game (Hadesphere, Vital Colony, Martian Industries):
-
-- **Pick a milestone by generation 2 even when your opening has no obvious one.** Vital Colony on
-  Titania (placement bonus twice) gave 10 VP in generation 1, but I never raced a milestone, and all
-  three were gone by generation 5. The winner's 10 milestone VP alone was over half the 20-point gap.
-- **Urbanist counts ocean points from Capital, and rivals can pad it in the last generation.** I funded
-  it in generation 4 on a 2–0 lead. A rival's Capital (+1 per adjacent ocean) jumped them to 7, and with
-  late cities and greeneries they won 11 to 10. Before funding a board award, count each rival's open
-  city sites next to greeneries or oceans, and keep 23 M€ per greenery for the final generation.
-- **Underworld tokens: some last only for the current generation, and Excavate:SP shows its spaces only
-  after you pay.** "mcprod1pertemp" gave +1 M€ production per temperature step for the rest of that
-  generation; an Asteroid standard project right after digging it gained TR and +1 M€ production. In the
-  final generation, a 6 M€ Excavate:SP had only known useless tokens in reach. Check the identified
-  tokens next to your tiles (`tfm value` lists them) before paying.
-
-Lessons from 3rd place, 81 vs 94, in the same game (Lakefront Resorts; TR 40, 0 award VP, 11 board
-points against the 2nd-place rival's 17):
-
-- **Funding no award meant 0 award VP: all three were funded by rivals by generation 6.** My only lead
-  was Miner (11 to 6 in generation 4), which counted titanium I meant to spend on space cards, so I never
-  funded it, and by generation 6 it had dropped to a tie. The winner's 10 award VP were most of the
-  13-point gap. If you lead nothing your engine keeps raising, plan to score those 10 VP somewhere else.
-- **`tfm value` can badly underprice a card whose effect is custom code.** It rated Terraforming
-  Ganymede at ≈10 (net −23) because it ignored the TR per Jovian tag. Played after Callisto Penal Mines
-  and Space Wargames, the card gave 4 TR in generation 4, worth about 45 M€. When the value has a
-  `? custom code` line, work out the real effect yourself.
-- **"1 VP per Jovian tag" cards make each later Jovian tag worth 2 VP or more.** Space Wargames and
-  Water Import From Europa each scored 6. Every Jovian card played after them (Ganymede, Water Import)
-  added a VP to both, and the titanium from Galilean Mining paid for most of it. Security Fleet
-  (1 titanium → 1 VP) used the spare titanium, and Project Inspection repeated its action.
-- **Lakefront Resorts earned its income from rivals' oceans.** Oceans were full by generation 3
-  (+13 M€ production, 4 of it from prelude oceans). Two early Aquifer standard projects were worth it
-  for the TR and the 3 M€ adjacency bonus. I skipped Aquifer Pumping and Icy Impactors, which would
-  have gone dead within a generation.
-- **Legend (5 events) can be claimed cheaply.** Project Inspection (0 M€), Water to Venus (titanium),
-  Asteroid and Interplanetary Colony Ship took 2 events to 5 in generation 5. Interplanetary Colony
-  Ship and the claim used the same turn's two actions.
-
-Recurring patterns: awards and milestones decided every close game; TR alone never did; board
-points were the biggest gap for players who started their ground game late; and production bought late
-rarely paid back.
-
----
-
-## 12. Turn routine with `tfm`
+- Estimate the generations left yourself from the board and pass the result to `tfm value --gens N`.
+- Run `tfm vp` to see where you stand, and `tfm value` on the cards you're thinking of buying.
+- Recheck which milestones and awards are still open and what you need to take one.
 
 On each `tfm turn`:
 
