@@ -11,7 +11,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import data, digest, options, seats, value
+from . import data, digest, options, score, seats, value
 from .client import DEFAULT_SERVER, Client, TfmError, create_game, parse_link
 from .text import card_line, message
 
@@ -102,14 +102,25 @@ def _print_values(view, names=None, gens=None):
         print("\n".join(value.describe(v, where)))
 
 
-def _show(view, seat, client, full, with_state=True, with_values=False):
+def _show(view, seat, client, full, with_state=True, with_values=False, snapshot=False):
     ctx = options.Context(view, set(seat.get("seen", [])), full)
     if view["game"]["phase"] == "end":
         print("\n".join(digest.final_scores(view)))
         _finish(seat, ctx)
         return
     logs = _new_logs(client, seat, view)
-    if with_state:
+    if with_state and seat.get("output") == "changes":
+        # Repeat only sections that changed since this seat's last turn; a full snapshot on the first
+        # turn of each generation, or on request.
+        gen = view["game"]["generation"]
+        shown = {} if snapshot or full or seat.get("shown_gen") != gen else seat.get("shown", {})
+        lines, seat["shown"] = digest.changes_only(digest.sections(view, ctx, logs), shown)
+        seat["shown_gen"] = gen
+        if not shown:
+            lines.insert(0, "FULL SNAPSHOT (later turns this generation repeat only what changed)")
+        print("\n".join(lines))
+        print()
+    elif with_state:
         print("\n".join(digest.summarize(view, ctx, logs)))
         print()
     _print_options(view, ctx, seat)
@@ -173,18 +184,31 @@ def cmd_turn(args):
             if status["result"] == "GO":
                 continue
         time.sleep(POLL_SECONDS)
-    _show(view, seat, client, args.full, with_values=args.value)
+    _show(view, seat, client, args.full, with_values=args.value, snapshot=args.snapshot)
 
 
 def cmd_state(args):
     seat = seats.load(args.seat)
     client = _client(seat)
-    _show(client.player(), seat, client, args.full, with_values=args.value)
+    _show(client.player(), seat, client, args.full, with_values=args.value, snapshot=args.snapshot)
 
 
 def cmd_value(args):
     seat = seats.load(args.seat)
     _print_values(_client(seat).player(), args.names, args.gens)
+
+
+def cmd_vp(args):
+    seat = seats.load(args.seat)
+    client = _client(seat)
+    view = client.player()
+    trades = None
+    if score.vp_trade_colonies(view["game"]):
+        logs = []
+        for g in range(1, view["game"]["generation"] + 1):
+            logs.extend(client.logs(g) or [])
+        trades = score.count_vp_trades(view["game"], logs)
+    print("\n".join(score.report(view, trades)))
 
 
 def cmd_options(args):
@@ -327,17 +351,22 @@ def main(argv=None):
     p.add_argument("--wait", type=int, default=100, help="seconds to wait before giving up (default 100)")
     p.add_argument("--full", action="store_true", help="repeat card and milestone text already shown")
     p.add_argument("--value", action="store_true", help="also print `tfm value` for the cards in the decision and hand")
+    p.add_argument("--snapshot", action="store_true", help="print every section, not only what changed")
     p.set_defaults(fn=cmd_turn)
 
     p = sub.add_parser("state", help="print state and choices now, without waiting")
     p.add_argument("--full", action="store_true")
     p.add_argument("--value", action="store_true", help="also print `tfm value` for the cards in the decision and hand")
+    p.add_argument("--snapshot", action="store_true", help="print every section, not only what changed")
     p.set_defaults(fn=cmd_state)
 
     p = sub.add_parser("value", help="estimate what cards are worth in M€ now, with context checks")
     p.add_argument("names", nargs="*", help="cards to value (default: cards in the pending decision and your hand)")
     p.add_argument("--gens", type=int, help="override the estimated generations left (including this one)")
     p.set_defaults(fn=cmd_value)
+
+    sub.add_parser("vp", help="every player's VP if the game ended now (rivals estimated from public info)"
+                   ).set_defaults(fn=cmd_vp)
 
     p = sub.add_parser("options", help="print only the current choices")
     p.add_argument("--full", action="store_true")
@@ -368,6 +397,9 @@ def main(argv=None):
     p.set_defaults(fn=cmd_new_game)
 
     args = parser.parse_args(argv)
+    transcript = _transcript_path(args)
+    if transcript:
+        real, sys.stdout = sys.stdout, _Tee(sys.stdout, transcript, argv if argv is not None else sys.argv[1:])
     try:
         args.fn(args)
     except TfmError as e:
@@ -375,6 +407,37 @@ def main(argv=None):
         sys.exit(1)
     except KeyboardInterrupt:
         sys.exit(130)
+    finally:
+        if transcript:
+            sys.stdout.close()
+            sys.stdout = real
+
+
+def _transcript_path(args):
+    """A seat can record everything tfm prints for it (set "transcript" in its seat file)."""
+    if args.cmd in ("join", "seats", "leave", "card", "new-game"):
+        return None
+    try:
+        return seats.load(args.seat).get("transcript")
+    except TfmError:
+        return None
+
+
+class _Tee:
+    def __init__(self, out, path, argv):
+        self.out, self.file = out, open(path, "a")
+        self.file.write(f"\n>>> {time.strftime('%H:%M:%S')} tfm {' '.join(argv)}\n")
+
+    def write(self, text):
+        self.file.write(text)
+        return self.out.write(text)
+
+    def flush(self):
+        self.file.flush()
+        self.out.flush()
+
+    def close(self):
+        self.file.close()
 
 
 if __name__ == "__main__":
