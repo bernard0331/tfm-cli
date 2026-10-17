@@ -66,6 +66,7 @@ python3 tools/random_bot.py seat1 seat2 seat3
 | `tfm -s NAME play ID [VALUE ...] [--expect TEXT]` | Submit a choice; `--expect` refuses if the option no longer contains TEXT |
 | `tfm -s NAME state` / `options` | Print state and choices / choices only, without waiting |
 | `tfm -s NAME board` / `log` | List tiles / this generation's log |
+| `tfm -s NAME vp` | Every player's VP if the game ended now: yours from the app, rivals' recomputed from public info (TR, milestones, award standings, tiles, played cards) |
 | `tfm card NAME ...` | Card text from the bundled card data |
 | `tfm -s NAME value [CARD ...] [--gens N]` | Estimate what cards are worth in M€ now (default: the cards in your pending decision and hand), with context checks. `turn --value` / `state --value` append the same report |
 | `tfm seats` / `tfm leave NAME` | List / remove saved seats |
