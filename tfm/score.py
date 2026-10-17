@@ -63,7 +63,7 @@ def _next_to_own_tile(game, color, card_name, kinds):
 def card_points(player, game):
     """(points, cards whose VP could not be computed) for a player's played cards."""
     points, unknown, negative = 0, [], 0
-    cities_on_mars = sum(1 for s in game["spaces"] if _tile(s) in CITY_TILES and s.get("spaceType") != "colony")
+    cities_in_play = sum(1 for s in game["spaces"] if _tile(s) in CITY_TILES)
     colonies_in_play = sum(len(c.get("colonies", [])) for c in game.get("colonies") or [])
     for card in player["tableau"]:
         vp = (data.behavior(card["name"]) or {}).get("vp")
@@ -77,7 +77,7 @@ def card_points(player, game):
         elif isinstance(vp, dict) and "tag" in vp and len(vp) <= 2:
             got = player["tags"].get(vp["tag"], 0) // vp.get("per", 1)
         elif isinstance(vp, dict) and "cities" in vp and vp.get("all"):
-            got = cities_on_mars // vp.get("per", 1)
+            got = cities_in_play // vp.get("per", 1)
         elif isinstance(vp, dict) and "colonies" in vp and vp.get("all"):
             got = colonies_in_play // vp.get("per", 1)
         elif isinstance(vp, dict) and "nextToThis" in vp and ("cities" in vp or "oceans" in vp):

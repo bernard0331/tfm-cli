@@ -112,6 +112,28 @@ class Context(unittest.TestCase):
         self.assertIn("venus track 8: you get venus_scale", labels)
         self.assertIn("Venus reaches 16%: +1 TR (via venus track 8)", labels)
 
+    def test_track_greenery_unlocks_gardener(self):
+        ms = {"name": "Gardener", "scores": [{"color": "red", "score": 2}]}
+        ctx = value.Outlook(view(pathfinders={"earth": 21}, milestones=[ms]))
+        v = value.value_card("Sponsors", ctx)
+        self.assertIn(("lets you claim Gardener (5 VP for 8 M€)", 17), v.parts)
+        self.assertTrue(any(f.startswith("MILESTONE: Gardener 2→3/3") for f in v.flags), v.flags)
+
+    def test_track_greenery_changes_funded_award(self):
+        aw = {"name": "Cultivator", "playerName": "p0", "scores": [
+            {"color": "red", "score": 2}, {"color": "green", "score": 3},
+            {"color": "blue", "score": 1}, {"color": "yellow", "score": 0},
+        ]}
+        ctx = value.Outlook(view(pathfinders={"earth": 21}, awards=[aw]))
+        v = value.value_card("Sponsors", ctx)
+        self.assertIn(("Cultivator award position", 15), v.parts)
+
+    def test_track_city_triggers_rival_cards(self):
+        vw = view(pathfinders={"mars": 16})
+        vw["players"][1]["tableau"] = [{"name": "Rover Construction"}]
+        v = value.value_card("Dust Storm", value.Outlook(vw))
+        self.assertTrue(any("triggers p1's Rover Construction" in f for f in v.flags), v.flags)
+
     def test_exploitation_of_venus_pays_the_raiser(self):
         vw = view(venus=10)
         vw["players"][1]["tableau"] = [{"name": "Exploitation Of Venus"}]
@@ -167,6 +189,14 @@ class OwnTriggers(unittest.TestCase):
     def test_temperature_trigger_counts_each_step(self):
         v = value.value_card("Big Asteroid", with_tableau("Homeostasis Bureau", temperature=-20))
         self.assertEqual(self.part(v, "Homeostasis Bureau"), 6)
+
+    def test_track_city_pays_own_city_triggers_once(self):
+        ctx = with_tableau("Tharsis Republic", "Pets", pathfinders={"mars": 16})
+        v = value.value_card("Dust Storm", ctx)
+        self.assertEqual(self.part(v, "Tharsis Republic"), ctx.phases + 3)
+        self.assertEqual(self.part(v, "Pets"), value.VP / 2)
+        self.assertEqual(sum(amount for label, amount in v.parts if label == "mars track 17: you get city"),
+                         value.CITY_TILE)
 
     def test_tr_trigger_counts_bonus_steps(self):
         # Own oxygen step, then the 8% bonus temperature step, then the 0°C ocean: 3 TR.

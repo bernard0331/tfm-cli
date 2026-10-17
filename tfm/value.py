@@ -615,7 +615,7 @@ def _simulate(v, ctx):
 
     The card's own steps, tiles and tags are queued first (their TR is priced in _apply). Each handler
     updates the state and may queue further events: oxygen 8% queues a temperature step, 0 °C queues an
-    ocean, a planetary-track reward can raise Venus or place an ocean or greenery. Bonus events are priced
+    ocean, a planetary-track reward can raise Venus or place an ocean, greenery or city. Bonus events are priced
     here, labelled with what set them off. When the queue is empty, your own cards' triggers are priced
     from everything that happened (see OWN_TRIGGERS)."""
     sim = _Sim(v, ctx)
@@ -716,6 +716,10 @@ class _Sim:
         self._price(label, n * VP)
         self.queue.append(("oxygen", n, f"oxygen step from that greenery{via}", via))
 
+    def _city(self, n, label, via):
+        self.tiles["city"] += n
+        self._price(label, n * CITY_TILE)
+
     def _venus(self, n, label, via):
         ctx, v = self.ctx, self.v
         for _ in range(min(n, self.left["venus"])):
@@ -738,7 +742,7 @@ class _Sim:
                 self.last.append("venus")
 
     # Planetary-track rewards that change the board go back into the queue instead of a flat price.
-    _CHAIN_REWARDS = {"venus_scale": "venus", "ocean": "ocean", "greenery": "greenery"}
+    _CHAIN_REWARDS = {"venus_scale": "venus", "ocean": "ocean", "greenery": "greenery", "city": "city"}
 
     def _track(self, payload, label, via):
         track, n = payload
@@ -772,6 +776,9 @@ class _Sim:
     def finish(self):
         ctx, v = self.ctx, self.v
         v.sim = {**self.steps, **self.tiles}
+        # Milestone and award checks run after the simulation and must include bonus tiles.
+        # These counts already include the card's own tiles, so replace rather than add.
+        v.tiles.update(self.tiles)
         if "temperature" in self.last:
             holders = [f"{p['name']} ({p['heat']} heat)" for p in ctx.rivals if p["heat"] >= 8]
             v.flags.append("takes the LAST temperature step" + (f": strands {', '.join(holders)}" if holders else ""))

@@ -32,6 +32,18 @@ class Awards(unittest.TestCase):
 
 
 class Cards(unittest.TestCase):
+    def test_city_vp_includes_off_mars_cities(self):
+        game = {"spaces": [
+            {"id": "a", "tileType": 2, "spaceType": "land"},
+            {"id": "b", "tileType": 3, "spaceType": "land"},
+            {"id": "c", "tileType": 2, "spaceType": "colony"},
+            {"id": "d", "tileType": 0, "spaceType": "land"},
+        ], "colonies": []}
+        for name in ("Immigration Shuttles", "Off-World City Living"):
+            with self.subTest(card=name):
+                player = {"color": "red", "tags": {}, "tableau": [{"name": name}]}
+                self.assertEqual(score.card_points(player, game), (1, [], 0))
+
     def test_resource_and_tag_vp(self):
         player = {"color": "red", "tags": {"jovian": 3},
                   "tableau": [{"name": "Birds", "resources": 3}, {"name": "Io Mining Industries"}]}
