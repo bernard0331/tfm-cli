@@ -26,7 +26,7 @@ import random
 import re
 from collections import deque
 
-from . import data
+from . import data, deck
 
 VP, CARD, BUY_COST = 5.0, 3.5, 3
 CITY_TILE, SPECIAL_TILE, COLONY = 5.0, 2.0, 10.0
@@ -1112,8 +1112,8 @@ def future_matches(ctx, event):
 
     Events use the _play_counts keys ("tag:earth", "card:jovian", "card" for any project card, "event",
     "space_event", "cost20", "notags", "onetag", "tag:bio") and the OWN_TRIGGERS ones ("ocean", "city", ...).
-    Returns 0.0 until deck composition is modelled."""
-    return 0.0
+    Drawn cards are counted from the deck's composition (tfm/deck.py); tile and parameter events are 0."""
+    return deck.future_matches(ctx, event)
 
 
 def _kept_tags(name):

@@ -1,5 +1,6 @@
 """Checks for tfm value against small hand-built game views. Run: python3 -m unittest discover tests"""
 import unittest
+from contextlib import contextmanager
 
 from tfm import value
 
@@ -302,6 +303,21 @@ def hand(*names):
 UNRELATED = hand("Mine", "Power Plant", "Asteroid")
 
 
+@contextmanager
+def draws(fn):
+    """Replace the future-draws hook (tfm/deck.py) for tests about the hand alone."""
+    original = value.future_matches
+    value.future_matches = fn
+    try:
+        yield
+    finally:
+        value.future_matches = original
+
+
+def no_draws():
+    return draws(lambda ctx, event: 0.0)
+
+
 class PlannedTableau(unittest.TestCase):
     def worth(self, name, cards, **kw):
         return value.value_card(name, value.Outlook(view(hand=cards, **kw)), buying=True)
@@ -317,18 +333,23 @@ class PlannedTableau(unittest.TestCase):
         self.assertAlmostEqual(v.value - plain.value, 3 * value.VP / 2)
 
     def test_point_luna_counts_earth_cards_in_hand(self):
-        v, _ = self.assertCombo("Point Luna", hand("Sponsors", "Earth Office", "Media Group"), 9)
+        self.assertCombo("Point Luna", hand("Sponsors", "Earth Office", "Media Group"), 9)
+        with no_draws():
+            v, _ = self.assertCombo("Point Luna", hand("Sponsors", "Earth Office", "Media Group"), 9)
         self.assertEqual(v.combo, [("effect ×4.0 (incl. 1 own)", 4 * value.CARD)])
 
     def test_ecological_zone_counts_animal_and_plant_cards(self):
         self.assertCombo("Ecological Zone", hand("Small Animals", "Lichen", "Grass"), 6)
 
     def test_tag_discount_counts_matching_hand(self):
-        v, plain = self.assertCombo("Earth Office", hand("Sponsors", "Media Group", "Space Hotels"), 6)
+        self.assertCombo("Earth Office", hand("Sponsors", "Media Group", "Space Hotels"), 6)
+        with no_draws():
+            v, plain = self.assertCombo("Earth Office", hand("Sponsors", "Media Group", "Space Hotels"), 6)
         self.assertEqual(plain.combo, [("discount 3/earth ×0.0", 0.0)])
 
     def test_general_discount_counts_every_project_card(self):
-        v = self.worth("Earth Catapult", UNRELATED)
+        with no_draws():
+            v = self.worth("Earth Catapult", UNRELATED)
         self.assertIn(("discount 2 ×3.0", 6.0), v.combo)
 
     def test_priced_effect_replaces_the_unknown_note(self):
@@ -352,7 +373,8 @@ class PlannedTableau(unittest.TestCase):
         # Fish needs +2 °C: 13 steps away, not reached in the 2 generations left.
         ctx = value.Outlook(view(hand=hand("Fish")), gens_left=2)
         self.assertEqual(value.planned_tableau(ctx)[0]["p"], 0.0)
-        self.assertEqual(value.value_card("Arklight", ctx).combo, [("effect ×1.0 (incl. 1 own)", value.VP / 2)])
+        with no_draws():
+            self.assertEqual(value.value_card("Arklight", ctx).combo, [("effect ×1.0 (incl. 1 own)", value.VP / 2)])
 
     def test_requirement_met_at_current_pace(self):
         ctx = value.Outlook(view(temperature=-20, hand=hand("Grass")), gens_left=5)
@@ -370,7 +392,8 @@ class PlannedTableau(unittest.TestCase):
         self.assertIn(("feeds Ganymede Colony", value.VP), v.combo)
 
     def test_vp_per_tag_counts_planned_tags(self):
-        v = self.worth("Ganymede Colony", hand("Io Mining Industries"))
+        with no_draws():
+            v = self.worth("Ganymede Colony", hand("Io Mining Industries"))
         self.assertIn(("jovian tags planned ×1.0", value.VP), v.combo)
 
     def test_unlock_is_worth_more_than_a_hand_that_would_unlock_it_anyway(self):
@@ -383,14 +406,14 @@ class PlannedTableau(unittest.TestCase):
         self.assertGreater(unlock(covered), 0)
 
     def test_future_matches_hook_feeds_effects(self):
-        self.assertEqual(value.future_matches(value.Outlook(view()), "tag:earth"), 0.0)
-        base = self.worth("Point Luna", []).value
-        original = value.future_matches
-        value.future_matches = lambda ctx, event: 2.0 if event == "tag:earth" else 0.0
-        try:
+        # The real hook counts future draws from the deck (tests/test_deck.py checks the numbers).
+        ctx = value.Outlook(view())
+        self.assertGreater(value.future_matches(ctx, "tag:earth"), 0.0)
+        self.assertEqual(value.future_matches(ctx, "ocean"), 0.0)
+        with no_draws():
+            base = self.worth("Point Luna", []).value
+        with draws(lambda ctx, event: 2.0 if event == "tag:earth" else 0.0):
             self.assertAlmostEqual(self.worth("Point Luna", []).value, base + 2 * value.CARD)
-        finally:
-            value.future_matches = original
 
 
 if __name__ == "__main__":
