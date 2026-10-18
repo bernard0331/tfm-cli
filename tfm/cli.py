@@ -12,7 +12,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import data, digest, options, score, seats, value
+from . import data, digest, options, plan, score, seats, value
 from .client import DEFAULT_SERVER, Client, TfmError, create_game, parse_link
 from .text import card_line, message
 
@@ -211,6 +211,51 @@ def cmd_value(args):
     _print_values(_client(seat).player(), args.names, args.gens)
 
 
+def _print_plan(view, names=(), opening=False, gens=None):
+    """`tfm plan`: projected final VP and play order; named cards get their with-minus-without VP."""
+    if opening:
+        offered = plan.opening_cards(view)
+        if names:
+            keys = [data.card_name(n) or n for n in names]
+            kinds = {k: (data.card(k) or {}).get("type") for k in keys}
+            corps = [k for k in keys if kinds[k] == "corporation"]
+            if len(corps) != 1:
+                print("--opening with names needs exactly one corporation (plus preludes and kept cards).")
+                return
+            pres = [k for k in keys if kinds[k] == "prelude"]
+            keep = [k for k in keys if kinds[k] not in ("corporation", "prelude")]
+            p = plan.opening(view, corps[0], pres, keep, gens)
+            print(f"OPENING {corps[0]} + {', '.join(pres) or 'no preludes'} · keep {len(keep)}: ~{p.vp:.0f} VP")
+            print("\n".join(plan.describe(p)[1:]))
+            return
+        ranked = plan.best_openings(view, offered, gens)
+        if not ranked:
+            print("No opening decision found: name a corporation, preludes and cards to keep.")
+            return
+        print("OPENINGS by projected final VP (your economy only; kept cards = the ones its plan plays):")
+        for n, (p, corp, pres, keep) in enumerate(ranked, 1):
+            print(f"  {n}. ~{p.vp:.0f} VP: {corp} + {', '.join(pres) or 'no preludes'} · keep {len(keep)}: "
+                  + (", ".join(keep) or "none"))
+        print("\n".join(plan.describe(ranked[0][0])[1:]))
+        return
+    p = plan.project(view, gens=gens)
+    print("\n".join(plan.describe(p)))
+    hand = {c["name"] for c in view.get("cardsInHand") or []}
+    for n in names or ():
+        key = data.card_name(n)
+        if key is None:
+            print(f"{n}: not found")
+            continue
+        buying = key not in hand
+        delta = plan.decision_value(view, key, buying=buying, gens=gens)
+        print(f"  {key}: {delta:+.1f} VP to the projection" + (" (if bought for 3 M€)" if buying else " (vs never playing it)"))
+
+
+def cmd_plan(args):
+    seat = seats.load(args.seat)
+    _print_plan(_client(seat).player(), args.names, args.opening, args.gens)
+
+
 def cmd_vp(args):
     seat = seats.load(args.seat)
     client = _client(seat)
@@ -377,6 +422,14 @@ def main(argv=None):
     p.add_argument("names", nargs="*", help="cards to value (default: cards in the pending decision and your hand)")
     p.add_argument("--gens", type=int, help="override the estimated generations left (including this one)")
     p.set_defaults(fn=cmd_value)
+
+    p = sub.add_parser("plan", help="project your final VP by simulating your economy to the end of the game")
+    p.add_argument("names", nargs="*", help="cards to price as projected VP with minus without; with --opening, "
+                   "a corporation, preludes and cards to keep")
+    p.add_argument("--opening", action="store_true",
+                   help="score corporation + preludes + kept hand as one bundle (default: rank the offered ones)")
+    p.add_argument("--gens", type=int, help="override the estimated generations left (including this one)")
+    p.set_defaults(fn=cmd_plan)
 
     sub.add_parser("vp", help="every player's VP if the game ended now (rivals estimated from public info)"
                    ).set_defaults(fn=cmd_vp)
