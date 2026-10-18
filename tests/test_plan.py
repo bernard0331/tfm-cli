@@ -5,7 +5,7 @@ import time
 import unittest
 from unittest import mock
 
-from tfm import cli, plan, value
+from tfm import cli, deck, plan, value
 from test_value import view
 
 
@@ -91,17 +91,28 @@ class Projection(unittest.TestCase):
         s.tableau.append({"name": "Earth Office"})
         self.assertEqual(planner.card_cost("Business Network", s)[0], before - 3)
 
-    def test_future_matches_hook_drives_discounts_on_future_cards(self):
+    def test_deck_rate_drives_discounts_on_future_cards(self):
         v = game(mc=0)
         v["thisPlayer"]["tableau"] = [{"name": "Earth Office"}]
         flat = plan.project(v, gens=6).vp
-        with mock.patch.object(value, "future_matches", create=True, new=lambda ctx, event: 0.0):
+        with mock.patch.object(deck, "matches_per_gen", new=lambda ctx, event: 0.0):
             none = plan.project(v, gens=6).vp
-        with mock.patch.object(value, "future_matches", create=True,
-                               new=lambda ctx, event: 2.0 * ctx.gens_left if event == "tag:earth" else 0.0):
+        with mock.patch.object(deck, "matches_per_gen",
+                               new=lambda ctx, event: 2.0 if event == "tag:earth" else 0.0):
             many = plan.project(v, gens=6).vp
         self.assertLess(none, flat)
         self.assertGreater(many, flat)
+
+    def test_future_draw_discount_is_not_banked_twice(self):
+        # value.py prices Earth Office's discount on future draws; the simulation applies that discount to the
+        # card stream itself, so it must not also be banked as a lump sum.
+        planner = plan._Planner(game(), 6)
+        s = planner.state_from_view()
+        ctx = planner.ctx(s, 0)
+        v = value.value_card("Earth Office", ctx)
+        future = sum(a for label, a in v.combo if label.startswith("discount "))
+        self.assertGreater(future, 0)
+        self.assertLessEqual(planner.valuation("Earth Office", s, 0, ctx)[1], v.value - future + 1e-9)
 
     def test_fast_enough(self):
         hand = ["Kelp Farming", "Mine", "Earth Office", "Birds", "Strip Mine", "Comet", "Lichen", "Dust Seals",

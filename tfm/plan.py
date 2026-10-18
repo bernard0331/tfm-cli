@@ -21,8 +21,7 @@ The effects the simulation tracks step by step are production, stock resources, 
 oceans, greeneries, cities, printed VP and VP per tag. Everything else `value_card` prices (actions,
 triggers, card draws, bonus steps, ...) is banked at its M€ estimate for the generation the card is played
 in and converted at 5 M€ per VP. Tag discounts are applied to the hand cards they discount, and to the
-stream of future cards through `value.future_matches(ctx, event)` when it exists (a flat tag share of the
-deck otherwise).
+stream of future cards at the deck's rate of matching cards per generation (`deck.matches_per_gen`).
 
 Known limits (read the numbers as a plan, not a forecast):
 - Rivals are mostly ignored: they only raise the global parameters at the table pace. No attacks, no
@@ -37,13 +36,11 @@ Known limits (read the numbers as a plan, not a forecast):
 import functools
 import itertools
 
-from . import data, value
+from . import data, deck, value
 
 VP = value.VP
 
 # Assumptions, each derived from the rules or from value.py's own conventions (not fitted to games).
-AVG_CARDS_PER_GEN = 2      # research: see 4, keep and play about 2 per generation (same rate as tfm/deck.py);
-                           # used for how often future cards match a discount
 STREAM_CARDS_MAX = 4       # research shows 4 cards per generation: the most average cards one generation can buy
 STREAM_RATIO = 1.0         # an average kept card returns what it costs: value.py's break-even reference (Dust Seals),
                            # i.e. M€ the hand does not need still buys VP at value.py's 5 M€ per VP
@@ -161,12 +158,11 @@ def _share(modules, tag, events):
 
 
 def stream_matches(ctx, tag):
-    """Expected future (drawn, not yet in hand) plays with a tag in one generation: from
-    `value.future_matches` when another branch provides it, else the flat stream × the deck's tag share."""
-    hook = getattr(value, "future_matches", None)
-    if hook is not None and ctx.gens_left:
-        return hook(ctx, f"tag:{tag}") / ctx.gens_left
-    return AVG_CARDS_PER_GEN * _tag_share(ctx.expansions, tag)
+    """Expected plays with a tag among one generation's drawn cards (not yet in hand), from the deck's
+    composition (tfm/deck.py). Simulated generations start with an empty hand, so this generation's draws count
+    too, the last one included: the per-generation rate, not value.future_matches (which covers only the
+    generations after this one)."""
+    return deck.matches_per_gen(ctx, f"tag:{tag}")
 
 
 # --------------------------------------------------------------------------------------------- planner
@@ -233,8 +229,9 @@ class _Planner:
             out += vp * VP
         elif isinstance(vp, dict) and "tag" in vp:
             out += (value._resolve({"tag": vp["tag"]}, tags, ctx) // (vp.get("per") or 1)) * VP
-        # Discounts are applied by the simulation (hand cards and the future-card stream).
-        out += sum(amt for label, amt in v.parts if label.startswith("discount "))
+        # Discounts are applied by the simulation (hand cards and the future-card stream), so value.py's
+        # discount on future draws (in v.combo) is not banked as well.
+        out += sum(amt for label, amt in v.parts + v.combo if label.startswith("discount "))
         return out
 
     # ---- costs and requirements
