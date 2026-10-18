@@ -12,6 +12,11 @@ Two layers:
    parameter), the last step of a parameter, and what your own cards' triggers pay (OWN_TRIGGERS). Also:
    milestones it would let you claim, award positions it changes for you and for rivals, requirements it
    meets for cards in your hand, rivals' cards that pay out when you do this, and attacks a rival can block.
+3. **Combos with the hand** (planned tableau). Hand cards count as future plays, each with a chance of being
+   played before the end. Effects that depend on future plays (this card's OWN_TRIGGERS effect, discounts,
+   VP per tag) are priced from those chances, hand effect cards this card would fire get partial credit,
+   and requirements it meets for hand cards are priced by how much earlier they can be played. All of it
+   is the card's marginal value to the planned set, printed on one `combo` line.
 
 The numbers are estimates for comparing options, not exact values. Effects the app implements with
 custom code are flagged so you read the card text yourself.
@@ -176,11 +181,17 @@ class Valuation:
         self.card_resources = 0
         self.tokens = 0      # underground tokens claimed (Tunneler, Excavator)
         self.attack = False
+        self.combo = []      # (label, M€) priced from the planned tableau; printed on one line
 
     def add(self, label, amount):
         if amount:
             self.value += amount
             self.parts.append((label, amount))
+
+    def add_combo(self, label, amount, keep=False):
+        if amount or keep:
+            self.value += amount
+            self.combo.append((label, amount))
 
 
 def _resolve(count, card_tags, ctx):
@@ -381,8 +392,11 @@ def _apply(beh, v, ctx, card_tags, card_name, scale=1.0, label=""):
         v.add(f"{pre}greeneries cost 1 plant less", ctx.plant * ctx.plant_phases * 0.5)
 
 
-def value_card(name, ctx, cost=None, buying=False, model=None):
-    """Value a card for this player in this game. Returns a Valuation."""
+def value_card(name, ctx, cost=None, buying=False, model=None, nested=False):
+    """Value a card for this player in this game. Returns a Valuation.
+
+    `nested` is for valuations made inside another one (a hand card it unlocks): it skips unlock pricing,
+    which would value cards again."""
     info = data.card(name) or {}
     beh = data.behavior(name) or ({"behavior": STANDARD_BEHAVIORS[name]} if name in STANDARD_BEHAVIORS else {})
     v = Valuation(name)
@@ -442,13 +456,6 @@ def value_card(name, ctx, cost=None, buying=False, model=None):
             v.card_resources += trial.card_resources * uses
         else:
             v.flags.append(f"its action is worth ≈{per_use:.1f} M€ per use at current rates")
-    discount = beh.get("cardDiscount")
-    if discount:
-        discounts = discount if isinstance(discount, list) else [discount]
-        for d in discounts:
-            plays = (1.0 if d.get("tag") else 2.5) * ctx.gens_left
-            v.add(f"discount {d.get('amount', 0)}" + (f" on {d['tag']}" if d.get("tag") else "") + f" × ~{plays:g} plays",
-                  d.get("amount", 0) * plays)
     if beh.get("tr") and not beh.get("behavior", {}).get("tr") and beh.get("bespokePlay"):
         tr = beh["tr"]
         steps = sum(min(tr.get(k, 0), ctx.left.get({"oceans": "oceans"}.get(k, k), 99)) for k in ("temperature", "oxygen", "venus", "oceans")) + tr.get("tr", 0)
@@ -468,7 +475,7 @@ def value_card(name, ctx, cost=None, buying=False, model=None):
         v.manual.append("part of its play effect is custom code: read the card text")
     if beh.get("bespokeAction"):
         v.manual.append("its action is custom code: read the card text")
-    if beh.get("triggers"):
+    if beh.get("triggers") and not (name in OWN_TRIGGERS and name not in ctx.tableau):  # else priced in _plan
         v.manual.append("ongoing effect (" + ", ".join(beh["triggers"]) + "): value depends on future plays")
     if name in ("Convert Plants", "Convert Heat"):
         v.flags.append("uses 8 " + ("plants" if name == "Convert Plants" else "heat") + " (priced at 0: no other use)")
@@ -483,6 +490,7 @@ def value_card(name, ctx, cost=None, buying=False, model=None):
     bought = ctype in ("automated", "active", "event")  # only project cards carry the 3 M€ purchase price
     v.paid = v.cost + (BUY_COST if buying and bought else 0)
     _context(v, ctx)
+    _plan(v, ctx, nested)
     v.net = v.value - v.paid
     v.ratio = (v.value / v.paid) if v.paid else None
     return v
@@ -575,7 +583,6 @@ def _context(v, ctx):
     _simulate(v, ctx)
     _milestones(v, ctx)
     _awards(v, ctx)
-    _unlocks(v, ctx)
     _rival_triggers(v, ctx)
     if v.attack:
         _attack(v, ctx)
@@ -918,6 +925,7 @@ def _payout(kind, n, owner, ctx):
 
 def _own_triggers(v, ctx, sim):
     counts = _trigger_counts(v, ctx, sim)
+    v.trigger_counts = counts
     for owner in ctx.tableau:
         if owner == v.name:
             continue
@@ -1073,6 +1081,303 @@ def _awards(v, ctx):
                 v.add(f"{a['name']} award position", mine * VP)
             v.flags.append("AWARD " + text)
 
+
+
+# --------------------------------------------------------------------------------------------- planned tableau
+# The hand counts as future plays. Each project card in hand gets a chance of being played before the game
+# ends (affordable with the hand's share of your money; requirement met in time at the table's pace), and
+# effects that depend on future plays are priced from those chances. Every number below is an assumption
+# taken from the rules or plain reasoning, not fitted to game results.
+
+PROJECT = ("automated", "active", "event")
+# Share of the money you will still have that goes to cards already in hand. The rest buys new cards
+# (3 M€ each), standard projects, milestones and awards.
+HAND_BUDGET_SHARE = 0.5
+# Generations a hand card typically waits for money and an action before it is played.
+HAND_PLAY_DELAY = 1.0
+# Chance that a requirement met only by other hand cards' tags is met in time (they must be played first).
+HAND_TAG_REQ_P = 0.6
+# Chance for a requirement this model cannot check (greeneries, any player's cities, colonies...).
+UNCHECKED_REQ_P = 0.7
+# A hand effect card only fires on this card if it is played first: assume it is, half of the time.
+ORDER_SHARE = 0.5
+# Venus steps per generation when Venus does not count towards the game end (nobody needs to finish it).
+UNCOUNTED_VENUS_RATE = 1.0
+_PARAM_UNIT = {"temperature": 2, "oxygen": 1, "oceans": 1, "venus": 2}
+_SELF_TRIGGER = re.compile(r"including th(is|ese)", re.I)
+
+
+def future_matches(ctx, event):
+    """Expected number of times `event` happens from cards not drawn yet, over the rest of the game.
+
+    Events use the _play_counts keys ("tag:earth", "card:jovian", "card" for any project card, "event",
+    "space_event", "cost20", "notags", "onetag", "tag:bio") and the OWN_TRIGGERS ones ("ocean", "city", ...).
+    Returns 0.0 until deck composition is modelled."""
+    return 0.0
+
+
+def _kept_tags(name):
+    """Tags that stay on the tableau when the card is played (an event's tags do not)."""
+    info = data.card(name) or {}
+    return [] if info.get("type") == "event" else list(info.get("tags", []))
+
+
+def _play_counts(name):
+    """How often each trigger/discount event happens when this project card is played, from the card data
+    alone (bonus events from thresholds are left out)."""
+    info = data.card(name) or {}
+    ctype = info.get("type")
+    if ctype not in PROJECT:
+        return {}
+    tags = info.get("tags", [])
+    counts = {
+        "card": 1, "event": 1 if ctype == "event" else 0,
+        "space_event": 1 if ctype == "event" and "space" in tags else 0,
+        "notags": 1 if not tags else 0, "onetag": 1 if len(tags) == 1 else 0,
+        "cost20": 1 if (info.get("cost") or 0) >= 20 else 0,
+        "tag:bio": sum(tags.count(t) for t in ("plant", "animal", "microbe")),
+    }
+    for t in set(tags):
+        counts[f"tag:{t}"] = tags.count(t)
+        counts[f"card:{t}"] = 1
+    beh = (data.behavior(name) or {}).get("behavior") or {}
+    steps = dict(beh.get("global") or {})
+    oceans = (beh["ocean"].get("count", 1) if isinstance(beh["ocean"], dict) else 1) if "ocean" in beh else 0
+    counts.update({"ocean": oceans, "city": 1 if "city" in beh else 0, "greenery": 1 if "greenery" in beh else 0,
+                   "temperature": steps.get("temperature", 0), "oxygen": steps.get("oxygen", 0) + ("greenery" in beh),
+                   "venus": steps.get("venus", 0)})
+    tr = beh.get("tr") if isinstance(beh.get("tr"), (int, float)) else 0
+    counts["tr"] = tr + oceans + counts["temperature"] + counts["oxygen"] + counts["venus"]
+    return {k: n for k, n in counts.items() if n}
+
+
+def _param_rate(param, ctx):
+    """Steps per generation of one parameter: the table's pace, split by the steps each parameter has left."""
+    if param == "venus" and not ctx.venus_counts:
+        return UNCOUNTED_VENUS_RATE if ctx.left["venus"] else 0.0
+    return ctx.pace * ctx.left[param] / ctx.remaining_steps if ctx.remaining_steps else 0.0
+
+
+def _within(wait, ctx):
+    """Chance a play `wait` generations from now still happens: 1 before the last generation, fading over it."""
+    return max(0.0, min(1.0, ctx.gens_left - wait))
+
+
+def _req_timing(req, ctx, extra_tags=(), hand_tags=(), raises=None):
+    """(chance, generations to wait) for one requirement string from cards.json."""
+    raises = raises or {}
+    m = _REQ.match(req)
+    if m:
+        n, tag = int(m.group(2)), m.group(3)
+        have = ctx.tags.get(tag, 0) + ctx.tags.get("wild", 0) + list(extra_tags).count(tag)
+        if m.group(1):
+            return (1.0, 0.0) if have <= n else (0.0, math.inf)
+        if have >= n:
+            return 1.0, 0.0
+        hand = list(hand_tags).count(tag)
+        if have + hand >= n:
+            return HAND_TAG_REQ_P, HAND_PLAY_DELAY
+        future = future_matches(ctx, f"tag:{tag}")
+        if future <= 0:
+            return 0.0, math.inf
+        wait = (n - have - hand) / (future / ctx.gens_left)
+        return _within(wait, ctx), wait
+    m = re.match(r"^(max )?(temperature|oxygen|oceans|venus) (-?\d+)", req)
+    if m:
+        param, n, unit = m.group(2), int(m.group(3)), _PARAM_UNIT[m.group(2)]
+        have = {"temperature": ctx.temp, "oxygen": ctx.oxygen, "oceans": ctx.oceans, "venus": ctx.venus}[param] + \
+            raises.get(param, 0) * unit
+        rate = _param_rate(param, ctx)
+        if m.group(1):
+            if have > n:
+                return 0.0, math.inf
+            # Open until the parameter passes n; a hand card needs about HAND_PLAY_DELAY to get played.
+            window = ((n - have) // unit + 1) / rate if rate else math.inf
+            return min(1.0, window / HAND_PLAY_DELAY), 0.0
+        if have >= n:
+            return 1.0, 0.0
+        wait = math.ceil((n - have) / unit) / rate if rate else math.inf
+        return _within(wait, ctx), wait
+    m = re.match(r"^tr (\d+)", req)
+    if m:
+        need = int(m.group(1)) - ctx.me["terraformRating"]
+        if need <= 0:
+            return 1.0, 0.0
+        wait = need / (ctx.pace / len(ctx.players))  # your fair share of the table's terraforming
+        return _within(wait, ctx), wait
+    met, _ = requirement_status(req, ctx, extra_tags)
+    if met is True:
+        return 1.0, 0.0
+    return UNCHECKED_REQ_P, (HAND_PLAY_DELAY if met is False else 0.0)
+
+
+def _card_cost(model):
+    return model.get("calculatedCost", (data.card(model["name"]) or {}).get("cost") or 0)
+
+
+def _money(ctx):
+    """M€ you can still spend this game: what you hold plus income at each spendable production phase.
+    Steel and titanium count at full value, as if every card could use them."""
+    me = ctx.me
+    income = me.get("terraformRating", 20) + me.get("megaCreditProduction", 0) + \
+        me.get("steelProduction", 0) * ctx.steel + me.get("titaniumProduction", 0) * ctx.titanium
+    held = me.get("megaCredits", 0) + me.get("steel", 0) * ctx.steel + me.get("titanium", 0) * ctx.titanium
+    return held + income * ctx.phases
+
+
+def _hand_play(model, ctx, cards, afford, without=None, extra_tags=(), raises=None):
+    """(chance, wait) that one hand card gets played, with `without`'s tags left out of the hand."""
+    others = [t for c in cards if c is not model and c["name"] != without for t in _kept_tags(c["name"])]
+    p, wait = afford, 0.0
+    for req in (data.card(model["name"]) or {}).get("req", []):
+        rp, rw = _req_timing(req, ctx, extra_tags=extra_tags, hand_tags=others, raises=raises)
+        p, wait = p * rp, max(wait, rw)
+    return p, wait
+
+
+def planned_tableau(ctx):
+    """Hand project cards as future plays: [{"name", "p", "wait", "model"}], cached on ctx.
+
+    p is the chance the card is played before the game ends: an affordability share (HAND_BUDGET_SHARE of
+    your remaining money over the hand's total cost, at most 1) times the chance each requirement is met in
+    time. wait is the generations until its requirements are met."""
+    if getattr(ctx, "_planned", None) is not None:
+        return ctx._planned
+    cards = [c for c in ctx.hand if (data.card(c["name"]) or {}).get("type") in PROJECT]
+    total = sum(_card_cost(c) for c in cards)
+    ctx._afford = 1.0 if total <= 0 else max(0.0, min(1.0, HAND_BUDGET_SHARE * _money(ctx) / total))
+    ctx._planned = []
+    for c in cards:
+        p, wait = _hand_play(c, ctx, cards, ctx._afford)
+        ctx._planned.append({"name": c["name"], "p": p, "wait": wait, "model": c})
+    return ctx._planned
+
+
+def _matches(plan, event, ctx, kept=False):
+    """[(expected count, generations until it happens)] for an event over the planned plays and future draws.
+    `kept` counts only tags that stay on the tableau (for VP per tag)."""
+    out = []
+    for pc in plan:
+        if kept:
+            n = _kept_tags(pc["name"]).count(event[4:]) if event.startswith("tag:") else 0
+        else:
+            n = _play_counts(pc["name"]).get(event, 0)
+        if n and pc["p"]:
+            out.append((n * pc["p"], pc["wait"] + HAND_PLAY_DELAY))
+    future = future_matches(ctx, event)
+    if future:
+        out.append((future, ctx.gens_left / 2))  # spread evenly over the rest of the game
+    return out
+
+
+def _plan_payout(kind, n, owner, ctx, delay):
+    """_payout for an occurrence `delay` generations from now: production pays for fewer phases."""
+    if kind.startswith("prod:"):
+        res = kind[5:]
+        phases = ctx.plant_phases if res == "plants" else ctx.phases
+        return n * _unit(res, ctx) * max(0.0, phases - delay)
+    return _payout(kind, n, owner, ctx)
+
+
+def _self_counts(v):
+    """Events this card sets off for its own 'including this' effect."""
+    counts = dict(getattr(v, "trigger_counts", {}))
+    if (v.info or {}).get("type") not in PROJECT:
+        # A corporation's printed tags count as played when it enters the game.
+        for t in set(v.persistent_tags):
+            counts[f"tag:{t}"] = v.persistent_tags.count(t)
+        counts["tag:bio"] = sum(v.persistent_tags.count(t) for t in ("plant", "animal", "microbe"))
+    return counts
+
+
+def _discount_event(d):
+    if not d.get("tag"):
+        return "card"
+    return f"card:{d['tag']}" if d.get("per") == "card" else f"tag:{d['tag']}"
+
+
+def _plan(v, ctx, nested=False):
+    """Price this card's combos with the planned tableau, as its marginal value: only pairs that involve
+    this card, with this card left out of the plan, and nothing _own_triggers already priced."""
+    plan = [pc for pc in planned_tableau(ctx) if pc["name"] != v.name]
+    beh = data.behavior(v.name) or {}
+    owned = v.name in ctx.tableau
+
+    # This card's own effect on later plays.
+    if v.name in OWN_TRIGGERS and not owned:
+        self_counts = _self_counts(v) if _SELF_TRIGGER.search((v.info or {}).get("text", "")) else {}
+        amount, hand, own = 0.0, 0.0, 0.0
+        for event, pays, _ in OWN_TRIGGERS[v.name]:
+            items = _matches(plan, event, ctx)
+            if self_counts.get(event):
+                items.append((self_counts[event], 0.0))
+                own += self_counts[event]
+            hand += sum(n for n, _ in items)
+            amount += sum(_plan_payout(k, amt * n, v.name, ctx, delay) for n, delay in items for k, amt in pays)
+        label = f"effect ×{hand:.1f}" + (f" (incl. {own:g} own)" if own else "") if hand else "effect: no planned matches"
+        v.add_combo(label, amount, keep=True)
+
+    discount = beh.get("cardDiscount")
+    if discount:
+        for d in discount if isinstance(discount, list) else [discount]:
+            n = sum(n for n, _ in _matches(plan, _discount_event(d), ctx))
+            v.add_combo(f"discount {d.get('amount', 0)}" + (f"/{d['tag']}" if d.get("tag") else "") + f" ×{n:.1f}",
+                        d.get("amount", 0) * n, keep=True)
+
+    vp = beh.get("vp")
+    if isinstance(vp, dict) and "tag" in vp:
+        n = sum(n for n, _ in _matches(plan, f"tag:{vp['tag']}", ctx, kept=True))
+        v.add_combo(f"{vp['tag']} tags planned ×{n:.1f}", n / (vp.get("per") or 1) * VP)
+
+    # The reverse direction: effect cards in hand (and VP-per-tag cards anywhere) that this card feeds.
+    counts = getattr(v, "trigger_counts", None) or _play_counts(v.name)
+    fed, amount = [], 0.0
+    holders = [{"name": n, "p": 1.0, "wait": 0.0, "tableau": True} for n in ctx.tableau if n != v.name] + plan
+    for pc in holders:
+        got = 0.0
+        if not pc.get("tableau"):
+            for event, pays, _ in OWN_TRIGGERS.get(pc["name"], []):
+                n = counts.get(event, 0)
+                got += sum(_plan_payout(k, amt * n, pc["name"], ctx, pc["wait"]) for k, amt in pays) * pc["p"] * ORDER_SHARE
+            d_beh = (data.behavior(pc["name"]) or {}).get("cardDiscount")
+            for d in (d_beh if isinstance(d_beh, list) else [d_beh] if d_beh else []):
+                got += d.get("amount", 0) * counts.get(_discount_event(d), 0) * pc["p"] * ORDER_SHARE
+        h_vp = (data.behavior(pc["name"]) or {}).get("vp")
+        if isinstance(h_vp, dict) and "tag" in h_vp:
+            got += v.persistent_tags.count(h_vp["tag"]) / (h_vp.get("per") or 1) * VP * pc["p"]
+        if got > 0.05:
+            fed.append(pc["name"])
+            amount += got
+    if fed:
+        v.add_combo("feeds " + ", ".join(fed), amount)
+
+    if not nested:
+        _unlocks(v, ctx)
+
+
+def _unlocks(v, ctx):
+    """Hand cards whose requirement this card helps meet, priced by how much earlier they can be played."""
+    cards = [pc["model"] for pc in planned_tableau(ctx)]
+    sim = getattr(v, "sim", None) or {}
+    raises = {"temperature": sim.get("temperature", 0), "oxygen": sim.get("oxygen", 0), "venus": sim.get("venus", 0),
+              "oceans": sim.get("ocean", 0)}
+    for model in cards:
+        name = model["name"]
+        if name == v.name or not (data.card(name) or {}).get("req"):
+            continue
+        p0, w0 = _hand_play(model, ctx, cards, ctx._afford, without=v.name)
+        p1, w1 = _hand_play(model, ctx, cards, ctx._afford, without=v.name, extra_tags=v.persistent_tags, raises=raises)
+        if p1 <= p0 + 1e-9 and w1 >= w0 - 1e-9:
+            continue
+        y = value_card(name, ctx, model=model, nested=True)
+        per_phase = sum(n * _unit(r, ctx) for r, n in y.prod.items())
+
+        def worth(p, wait):
+            return p * max(0.0, y.net - per_phase * min(wait, ctx.phases)) if p else 0.0
+        gain = worth(p1, w1) - worth(p0, w0)
+        if gain > 0.05:
+            sooner = "" if not p0 else f" ~{w0 - w1:.1f} gen sooner"
+            v.add_combo(f"unlocks {name}{sooner}", gain)
 
 
 # --------------------------------------------------------------------------------------------- award funding
@@ -1249,19 +1554,6 @@ def describe_award(o, ctx):
     return line
 
 
-def _unlocks(v, ctx):
-    if not v.persistent_tags:
-        return
-    for c in ctx.hand:
-        if c["name"] == v.name:
-            continue
-        for req in (data.card(c["name"]) or {}).get("req", []):
-            before, _ = requirement_status(req, ctx)
-            after, text = requirement_status(req, ctx, extra_tags=v.persistent_tags)
-            if before is False and after is True:
-                v.flags.append(f"meets {c['name']}'s requirement ({text})")
-
-
 def _rival_triggers(v, ctx):
     sim = getattr(v, "sim", None) or {}
     hits = {"venus": sim.get("venus", 0) > 0, "colony": v.colonies > 0, "greenery": sim.get("greenery", 0) > 0,
@@ -1306,6 +1598,8 @@ def describe(v, where=""):
     lines = [head]
     if v.parts:
         lines.append("    " + "; ".join(f"{label} {amt:+.1f}" for label, amt in v.parts))
+    if v.combo:
+        lines.append(f"    combo {sum(a for _, a in v.combo):+.1f}: " + "; ".join(f"{label} {amt:+.1f}" for label, amt in v.combo))
     for f in v.flags:
         lines.append(f"    ⚑ {f}")
     for m in v.manual:

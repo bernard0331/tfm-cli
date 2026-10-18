@@ -180,7 +180,7 @@ class Context(unittest.TestCase):
     def test_unlocks_card_in_hand(self):
         ctx = value.Outlook(view(tags={"earth": 1}, hand=[{"name": "Space Hotels", "calculatedCost": 12}]))
         v = value.value_card("Terraforming Contract", ctx)
-        self.assertTrue(any("Space Hotels" in f for f in v.flags), v.flags)
+        self.assertTrue(any(label == "unlocks Space Hotels" and amount > 0 for label, amount in v.combo), v.combo)
 
     def test_award_points_tie_rules(self):
         self.assertEqual(value._award_points({"a": 3, "b": 3, "c": 1}, 3), {"a": 5, "b": 5, "c": 0})
@@ -293,6 +293,104 @@ class OwnTriggers(unittest.TestCase):
     def test_no_trigger_without_matching_effect(self):
         v = value.value_card("Big Asteroid", with_tableau("Arctic Algae", temperature=-20))
         self.assertIsNone(self.part(v, "Arctic Algae"))
+
+
+def hand(*names):
+    return [{"name": n} for n in names]
+
+
+UNRELATED = hand("Mine", "Power Plant", "Asteroid")
+
+
+class PlannedTableau(unittest.TestCase):
+    def worth(self, name, cards, **kw):
+        return value.value_card(name, value.Outlook(view(hand=cards, **kw)), buying=True)
+
+    def assertCombo(self, name, matching, margin, **kw):
+        with_combo, plain = self.worth(name, matching, **kw), self.worth(name, UNRELATED, **kw)
+        self.assertGreater(with_combo.value, plain.value + margin, (with_combo.combo, plain.combo))
+        return with_combo, plain
+
+    def test_arklight_counts_plant_cards_in_hand(self):
+        v, plain = self.assertCombo("Arklight", hand("Lichen", "Grass", "Heather"), 6)
+        # 3 plant tags + its own animal tag, 1 VP per 2 animals.
+        self.assertAlmostEqual(v.value - plain.value, 3 * value.VP / 2)
+
+    def test_point_luna_counts_earth_cards_in_hand(self):
+        v, _ = self.assertCombo("Point Luna", hand("Sponsors", "Earth Office", "Media Group"), 9)
+        self.assertEqual(v.combo, [("effect ×4.0 (incl. 1 own)", 4 * value.CARD)])
+
+    def test_ecological_zone_counts_animal_and_plant_cards(self):
+        self.assertCombo("Ecological Zone", hand("Small Animals", "Lichen", "Grass"), 6)
+
+    def test_tag_discount_counts_matching_hand(self):
+        v, plain = self.assertCombo("Earth Office", hand("Sponsors", "Media Group", "Space Hotels"), 6)
+        self.assertEqual(plain.combo, [("discount 3/earth ×0.0", 0.0)])
+
+    def test_general_discount_counts_every_project_card(self):
+        v = self.worth("Earth Catapult", UNRELATED)
+        self.assertIn(("discount 2 ×3.0", 6.0), v.combo)
+
+    def test_priced_effect_replaces_the_unknown_note(self):
+        v = self.worth("Point Luna", UNRELATED)
+        self.assertFalse(any("ongoing effect" in m for m in v.manual), v.manual)
+        self.assertEqual(len([l for l in value.describe(v) if "combo" in l]), 1)
+
+    def test_card_in_hand_is_not_counted_twice(self):
+        # Valuing a hand card leaves it out of the plan: its own tags count once, as its own.
+        offered = self.worth("Ecological Zone", [])
+        in_hand = self.worth("Ecological Zone", hand("Ecological Zone"))
+        self.assertAlmostEqual(offered.value, in_hand.value)
+
+    def test_unaffordable_hand_counts_less(self):
+        cards = hand("Lichen", "Grass", "Heather")
+        rich = value.value_card("Arklight", value.Outlook(view(hand=cards), gens_left=4))
+        poor = value.value_card("Arklight", value.Outlook(view(hand=cards + hand("Giant Ice Asteroid") * 4), gens_left=4))
+        self.assertLess(poor.value, rich.value)
+
+    def test_requirement_out_of_reach_counts_nothing(self):
+        # Fish needs +2 °C: 13 steps away, not reached in the 2 generations left.
+        ctx = value.Outlook(view(hand=hand("Fish")), gens_left=2)
+        self.assertEqual(value.planned_tableau(ctx)[0]["p"], 0.0)
+        self.assertEqual(value.value_card("Arklight", ctx).combo, [("effect ×1.0 (incl. 1 own)", value.VP / 2)])
+
+    def test_requirement_met_at_current_pace(self):
+        ctx = value.Outlook(view(temperature=-20, hand=hand("Grass")), gens_left=5)
+        pc = value.planned_tableau(ctx)[0]
+        self.assertEqual(pc["p"], 1.0)
+        self.assertGreater(pc["wait"], 0)
+
+    def test_reverse_feeds_effect_card_in_hand(self):
+        v = self.worth("Asteroid", hand("Media Group"))
+        self.assertIn(("feeds Media Group", 3 * value.ORDER_SHARE), v.combo)
+        self.assertEqual(self.worth("Asteroid", []).combo, [])
+
+    def test_reverse_vp_per_tag_in_hand(self):
+        v = self.worth("Io Mining Industries", hand("Ganymede Colony"))
+        self.assertIn(("feeds Ganymede Colony", value.VP), v.combo)
+
+    def test_vp_per_tag_counts_planned_tags(self):
+        v = self.worth("Ganymede Colony", hand("Io Mining Industries"))
+        self.assertIn(("jovian tags planned ×1.0", value.VP), v.combo)
+
+    def test_unlock_is_worth_more_than_a_hand_that_would_unlock_it_anyway(self):
+        # Luna Governor's Earth tags could also meet Space Hotels' requirement, but later and less surely.
+        def worth(cards):
+            return value.value_card("Sponsors", value.Outlook(view(hand=cards, tags={"earth": 1}), gens_left=6))
+        alone, covered = worth(hand("Space Hotels")), worth(hand("Space Hotels", "Luna Governor"))
+        unlock = lambda v: sum(a for label, a in v.combo if label.startswith("unlocks Space Hotels"))
+        self.assertGreater(unlock(alone), unlock(covered))
+        self.assertGreater(unlock(covered), 0)
+
+    def test_future_matches_hook_feeds_effects(self):
+        self.assertEqual(value.future_matches(value.Outlook(view()), "tag:earth"), 0.0)
+        base = self.worth("Point Luna", []).value
+        original = value.future_matches
+        value.future_matches = lambda ctx, event: 2.0 if event == "tag:earth" else 0.0
+        try:
+            self.assertAlmostEqual(self.worth("Point Luna", []).value, base + 2 * value.CARD)
+        finally:
+            value.future_matches = original
 
 
 if __name__ == "__main__":
