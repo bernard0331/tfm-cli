@@ -102,6 +102,17 @@ def _print_values(view, names=None, gens=None):
         print("\n".join(value.describe(v, where)))
 
 
+def _record_awards(seat, view):
+    """Keep each player's award scores per generation (latest look wins) so award growth can be measured."""
+    gen = view["game"]["generation"]
+    history = seat.setdefault("award_scores", {})
+    history[str(gen)] = {a["name"]: {s["color"]: s["score"] for s in a.get("scores", [])}
+                         for a in view["game"].get("awards") or []}
+    for g in [g for g in history if int(g) < gen - 3]:
+        del history[g]
+    return history
+
+
 def _show(view, seat, client, full, with_state=True, with_values=False, snapshot=False):
     ctx = options.Context(view, set(seat.get("seen", [])), full)
     if view["game"]["phase"] == "end":
@@ -109,19 +120,20 @@ def _show(view, seat, client, full, with_state=True, with_values=False, snapshot
         _finish(seat, ctx)
         return
     logs = _new_logs(client, seat, view)
+    history = _record_awards(seat, view)
     if with_state and seat.get("output") == "changes":
         # Repeat only sections that changed since this seat's last turn; a full snapshot on the first
         # turn of each generation, or on request.
         gen = view["game"]["generation"]
         shown = {} if snapshot or full or seat.get("shown_gen") != gen else seat.get("shown", {})
-        lines, seat["shown"] = digest.changes_only(digest.sections(view, ctx, logs), shown)
+        lines, seat["shown"] = digest.changes_only(digest.sections(view, ctx, logs, history), shown)
         seat["shown_gen"] = gen
         if not shown:
             lines.insert(0, "FULL SNAPSHOT (later turns this generation repeat only what changed)")
         print("\n".join(lines))
         print()
     elif with_state:
-        print("\n".join(digest.summarize(view, ctx, logs)))
+        print("\n".join(digest.summarize(view, ctx, logs, history)))
         print()
     _print_options(view, ctx, seat)
     if with_values:

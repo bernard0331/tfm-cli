@@ -17,6 +17,7 @@ The numbers are estimates for comparing options, not exact values. Effects the a
 custom code are flagged so you read the card text yourself.
 """
 import math
+import random
 import re
 from collections import deque
 
@@ -52,6 +53,12 @@ STANDARD_BEHAVIORS = {
     # Conversions spend plants/heat that have no better use, so only the gain is priced.
     "Convert Plants": {"greenery": {}},
     "Convert Heat": {"global": {"temperature": 1}},
+}
+
+# Cards whose TR depends on your tags are custom code in the app, so their count is spelled out here.
+TR_PER_TAG = {
+    "Terraforming Ganymede": {"tag": "jovian"},
+    "Social Events": {"tag": "mars", "per": 2},
 }
 
 # Well-known cards that pay their owner (or the acting player) when ANY player does something.
@@ -447,7 +454,14 @@ def value_card(name, ctx, cost=None, buying=False, model=None):
             for k in ("temperature", "oxygen", "venus", "oceans"):
                 v.raises[k] += tr.get(k, 0)
             v.tr += steps
-    if beh.get("bespokePlay"):
+    tr_count = TR_PER_TAG.get(name)
+    if tr_count:
+        # "Including this" counts the printed tags, even on an event.
+        steps = _resolve(tr_count, tags, ctx)
+        per = f" ÷ {tr_count['per']}" if tr_count.get("per") else ""
+        v.add(f"{steps:g} TR from {tr_count['tag']} tags{per}, including this", steps * ctx.tr)
+        v.tr += steps
+    elif beh.get("bespokePlay"):
         v.manual.append("part of its play effect is custom code: read the card text")
     if beh.get("bespokeAction"):
         v.manual.append("its action is custom code: read the card text")
@@ -1056,6 +1070,180 @@ def _awards(v, ctx):
                 v.add(f"{a['name']} award position", mine * VP)
             v.flags.append("AWARD " + text)
 
+
+
+# --------------------------------------------------------------------------------------------- award funding
+
+AWARD_FEES = (8, 14, 20)
+_CARD_COUNT_METRICS = {"automated", "active", "events", "projects_events", "projects", "blue_green", "reqcards",
+                       "cost20", "cost10", "notags"}
+# Spread of the final score per generation left, by how easily the count moves: production rarely drops,
+# counts of cards, tags and tiles grow in bursts, and stock can be spent at any time.
+_SPREAD = {"narrow": 0.4, "medium": 0.8, "wide": 1.5}
+# Played cards that raise a production count by themselves: (resource, rough steps per generation).
+_AUTO_PRODUCTION = {
+    "Botanical Experience": ("plants", 1 / 3),
+    "Immigrant City": ("megacredits", 0.7),
+    "Tharsis Republic": ("megacredits", 0.5),
+    "Saturn Systems": ("megacredits", 0.3),
+    "Poseidon": ("megacredits", 0.4),
+}
+_SAMPLES = 1000
+
+
+def _metric_kind(metric):
+    if metric.startswith("stock:") or metric == "hand":
+        return "wide"
+    if metric.startswith("prod:"):
+        return "narrow"
+    return "medium"
+
+
+def _award_rate(name, metric, color, score, ctx, history):
+    """Growth per generation: this seat's stored standings (up to 3 generations back) blended with the
+    average so far, which counts setup (corporation, preludes) as one generation."""
+    gen = ctx.generation
+    if metric == "tr":
+        # Everyone starts at 20 TR (14 solo); assume at least a fair share of the table's pace.
+        base = 14 if len(ctx.players) == 1 else 20
+        average = max((score - base) / gen, ctx.pace / len(ctx.players))
+    else:
+        average = score / (gen + 1)
+    past = [(int(g), s[name][color]) for g, s in (history or {}).items()
+            if gen - 3 <= int(g) < gen and color in (s.get(name) or {})]
+    if not past:
+        return average
+    g0, s0 = min(past)
+    weight = (gen - g0) / 3
+    return weight * max(0.0, (score - s0) / (gen - g0)) + (1 - weight) * average
+
+
+def _auto_growth(metric, player):
+    """Steps per generation the player's played cards add to this count without further plays."""
+    out = 0.0
+    for card in player.get("tableau") or []:
+        name = card["name"]
+        if metric.startswith("res:") or metric == "card_resources":
+            beh = data.behavior(name) or {}
+            rtype = beh.get("resourceType")
+            if not rtype or (metric.startswith("res:") and rtype not in metric[4:].split(",")):
+                continue
+            add = (beh.get("action") or {}).get("addResources")
+            out += add if isinstance(add, (int, float)) else (0.5 if beh.get("triggers") else 0)
+        elif metric.startswith("prod:") and name in _AUTO_PRODUCTION:
+            res, rate = _AUTO_PRODUCTION[name]
+            keys = metric[5:]
+            if keys == "all" or (keys == "nonmc" and res != "megacredits") or res in keys.split(","):
+                out += rate
+    return out
+
+
+def _hand_bump(metric, player, ctx):
+    """Cards in hand that could still raise a card-count or tag award: yours exactly, rivals' estimated."""
+    tags = metric[4:].split(",") if metric.startswith("tag:") else metric[5:].split(",") if metric.startswith("tags:") else None
+    if tags is None and metric not in _CARD_COUNT_METRICS:
+        return 0.0
+    if player["color"] == ctx.me["color"]:
+        hits = 0
+        for c in ctx.hand:
+            info = data.card(c["name"]) or {}
+            if tags is not None:
+                hits += 0 if info.get("type") == "event" else sum(info.get("tags", []).count(t) for t in tags)
+            else:
+                hits += 1 if info.get("type") in ("automated", "active", "event") else 0
+        return 0.6 * hits
+    hand = player.get("cardsInHandNbr") or 0
+    if tags is None:
+        return 0.25 * hand
+    have = player.get("tags") or {}
+    total = sum(n for t, n in have.items() if t != "event") or 1
+    share = max(0.05, sum(have.get(t, 0) for t in tags) / total)
+    return 0.5 * share * hand
+
+
+def award_outlook(award, ctx, history=None, seed=0):
+    """Project an award's final standings and what funding it is worth to you, in VP.
+
+    Each player's final score is their current score plus their growth rate (and what their played cards
+    add by themselves) over the generations left, plus cards in hand that could still count. A small
+    Monte Carlo around that, with the app's tie rules, gives the chance of finishing first or second.
+    """
+    metric = _AWARD_METRICS.get(award["name"])
+    scores = {s["color"]: s["score"] for s in award.get("scores", [])}
+    if not metric or ctx.me["color"] not in scores:
+        return None
+    kind = _metric_kind(metric)
+    players = {p["color"]: p for p in ctx.players}
+    proj = {}
+    for color, score in scores.items():
+        p = players.get(color, {})
+        rate = _award_rate(award["name"], metric, color, score, ctx, history) + _auto_growth(metric, p)
+        # Stock and hands get spent along the way, so only half their past growth is assumed to stick.
+        mean = score + rate * ctx.gens_left * (0.5 if kind == "wide" else 1) + _hand_bump(metric, p, ctx)
+        sigma = _SPREAD[kind] * math.sqrt(ctx.gens_left) * (1 + rate) + (0.4 * score if kind == "wide" else 0)
+        proj[color] = (mean, sigma)
+    if max(m for m, _ in proj.values()) < 1:
+        return None  # nobody has started on it: nothing to project yet
+    rng = random.Random(f"{award['name']}:{seed}")
+    points = {c: 0.0 for c in scores}
+    first = {c: 0 for c in scores}
+    second = {c: 0 for c in scores}
+    for _ in range(_SAMPLES):
+        final = {c: max(0, round(rng.gauss(m, s))) for c, (m, s) in proj.items()}
+        for c, pts in _award_points(final, len(ctx.players)).items():
+            points[c] += pts
+            first[c] += pts == 5
+            second[c] += pts == 2
+    points = {c: n / _SAMPLES for c, n in points.items()}
+    me = ctx.me["color"]
+    rivals = [c for c in scores if c != me]
+
+    def standing(c):
+        p = players.get(c, {})
+        return (p.get("victoryPointsBreakdown") or {}).get("total", p.get("terraformRating", 0))
+
+    leader = max(rivals, key=standing) if rivals else None
+    others = max(1, len(ctx.players) - 1)
+    gift = sum(points[c] * (1 if c == leader else 1 / others) for c in rivals)
+    funded = sum(1 for a in ctx.game.get("awards") or [] if a.get("playerName"))
+    fee = AWARD_FEES[funded] / VP if funded < len(AWARD_FEES) else None
+    rival_p1 = max((first[c] / _SAMPLES for c in rivals), default=0.0)
+    fund = points[me] - gift - fee if fee is not None else None
+    # A rival likely to win it will probably fund it: you then get your share without paying the fee.
+    wait = rival_p1 * (points[me] - gift)
+    return {
+        "name": award["name"], "current": scores, "metric": metric, "kind": kind, "projection": proj, "points": points,
+        "p1": first[me] / _SAMPLES, "p2": second[me] / _SAMPLES, "gift": gift, "fee": fee,
+        "fund": fund, "wait": wait, "rival_p1": rival_p1,
+        "top_rival": max(rivals, key=lambda c: points[c]) if rivals else None,
+    }
+
+
+def describe_award(o, ctx):
+    """One line: projected finish for you and the two strongest rivals, then funding vs waiting."""
+    me = ctx.me["color"]
+    rivals = [c for c in o["current"] if c != me and o["projection"][c][0] >= 0.5]
+    order = [me] + sorted(rivals, key=lambda c: -o["projection"][c][0])[:2]
+    parts = [("you" if c == me else ctx.names.get(c, c)) + f" {o['current'][c]}→~{o['projection'][c][0]:.0f}"
+             for c in order]
+    line = ", ".join(parts) + f" · P(1st) {o['p1']:.0%}"
+    if o["p2"] >= 0.05:
+        line += f", P(2nd) {o['p2']:.0%}"
+    if o["fund"] is not None:
+        top = o["top_rival"]
+        line += f" · fund EV {o['fund']:+.1f} VP"
+        if top is not None and o["points"][top] >= 0.05:
+            line += f" (gives {ctx.names.get(top, top)} ~{o['points'][top]:.1f})"
+        line += f" · wait {o['wait']:+.1f}"
+        if o["fund"] > max(o["wait"], 0) + 0.3:
+            line += " → fund"
+        elif o["wait"] > 0.3 and o["wait"] >= o["fund"]:
+            line += " → let a rival fund"
+        elif o["fund"] < 0:
+            line += " → don't fund"
+    if o["kind"] == "wide":
+        line += " · counts stock or hand: can be spent"
+    return line
 
 
 def _unlocks(v, ctx):

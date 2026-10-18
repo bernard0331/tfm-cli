@@ -43,7 +43,11 @@ use `tfm -s <seat> turn --wait 50`.
   over-deliberate routine moves.
 - `OPPONENTS`: public resources, tags and played cards.
 - `MILESTONES`: your score against the best rival's. `<<< YOU CAN CLAIM` means you qualify right now.
-- `AWARDS`: everyone's current score.
+- `AWARDS`: everyone's current score. While a slot is open, each unfunded award also gets a `→` line:
+  projected final scores (from how fast each count has grown and rivals' cards that raise it by
+  themselves), your chance of 1st and 2nd, **fund EV** (your expected award VP minus the fee and the VP
+  it hands rivals) and **wait** (your value if a rival likely to win funds it instead), with a verdict.
+  It's an estimate: check rivals' hands and played cards before acting on a close call.
 - `SINCE YOUR LAST LOOK`: what happened since your previous `turn`.
 - `YOUR DECISION`: the legal choices. Only these ids are accepted.
 
@@ -106,7 +110,7 @@ games. The short version:
 - Count remaining generations from how fast **all** players can finish the global parameters
   (temperature +8°C, oxygen 14%, 9 oceans). Engines that pay back after the game ends are worth nothing.
 - Recheck every milestone after each card or tile, and keep 8 M€ for a claim you can win.
-- Before funding an award, project rivals' final scores, not just today's.
+- Before funding an award, project rivals' final scores, not just today's: start from its `→` line in `AWARDS`.
 - Value heat at zero once temperature is maxed, unless a card gives it another use.
 - Before passing, look for leftover greeneries, milestones, awards, card actions and trades.
 - If your human gave you their own strategy notes, they take precedence over docs/STRATEGY.md.

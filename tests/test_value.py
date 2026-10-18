@@ -176,6 +176,71 @@ class Context(unittest.TestCase):
         self.assertEqual(value._award_points({"a": 3, "b": 2}, 2), {"a": 5, "b": 0})
 
 
+class TrPerTag(unittest.TestCase):
+    def test_ganymede_counts_jovian_tags_including_itself(self):
+        ctx = value.Outlook(view(tags={"jovian": 3}))
+        v = value.value_card("Terraforming Ganymede", ctx)
+        self.assertEqual(v.tr, 4)
+        self.assertAlmostEqual(v.value, 4 * ctx.tr + 2 * value.VP)
+        self.assertFalse(any("custom code" in m for m in v.manual), v.manual)
+
+    def test_social_events_counts_own_mars_tag_on_an_event(self):
+        ctx = value.Outlook(view(tags={"mars": 2}))
+        self.assertEqual(value.value_card("Social Events", ctx).tr, 1)
+        ctx = value.Outlook(view(tags={"mars": 3}))
+        self.assertEqual(value.value_card("Social Events", ctx).tr, 2)
+
+
+def award(name, mine, rival, funded_by=None):
+    a = {"name": name, "scores": [{"color": "red", "score": mine}, {"color": "green", "score": rival},
+                                  {"color": "blue", "score": 0}, {"color": "yellow", "score": 0}]}
+    if funded_by:
+        a["playerName"] = funded_by
+    return a
+
+
+class AwardFunding(unittest.TestCase):
+    def outlook(self, a, history=None, rival_tableau=(), gens_left=5):
+        vw = view(awards=[a])
+        vw["players"][1]["tableau"] = [{"name": n} for n in rival_tableau]
+        ctx = value.Outlook(vw, gens_left=gens_left)
+        return value.award_outlook(a, ctx, history), ctx
+
+    def test_wide_production_lead_is_worth_funding(self):
+        history = {"2": {"Banker": {"red": 10, "green": 2}}}
+        o, ctx = self.outlook(award("Banker", 16, 4), history)
+        self.assertEqual(o["kind"], "narrow")
+        self.assertGreater(o["p1"], 0.95)
+        self.assertGreater(o["fund"], 1)
+        self.assertIn("→ fund", value.describe_award(o, ctx))
+
+    def test_thin_stock_lead_is_not(self):
+        o, ctx = self.outlook(award("Miner", 6, 5))
+        self.assertEqual(o["kind"], "wide")
+        self.assertLess(o["p1"], 0.65)
+        self.assertLess(o["fund"], 1)
+        self.assertNotIn("→ fund", value.describe_award(o, ctx))
+
+    def test_rival_cards_that_add_animals_overtake_a_lead(self):
+        plain, _ = self.outlook(award("Zoologist", 5, 3))
+        o, ctx = self.outlook(award("Zoologist", 5, 3), rival_tableau=("Birds", "Fish", "Small Animals"))
+        self.assertGreater(o["projection"]["green"][0], o["projection"]["red"][0])
+        self.assertLess(o["p1"], plain["p1"])
+        self.assertLess(o["p1"], 0.3)
+        self.assertGreater(o["wait"], o["fund"])
+
+    def test_measured_growth_moves_the_projection(self):
+        a = award("Banker", 12, 12)
+        flat, _ = self.outlook(a, {"3": {"Banker": {"red": 12, "green": 6}}})
+        self.assertLess(flat["projection"]["red"][0], flat["projection"]["green"][0])
+
+    def test_no_fee_once_three_are_funded(self):
+        a = award("Banker", 10, 2)
+        vw = view(awards=[a, award("Miner", 1, 1, "p1"), award("Landlord", 1, 1, "p1"), award("Scientist", 1, 1, "p2")])
+        o = value.award_outlook(a, value.Outlook(vw, gens_left=3))
+        self.assertIsNone(o["fund"])
+
+
 def with_tableau(*names, **kw):
     vw = view(**kw)
     vw["thisPlayer"]["tableau"] = [{"name": n} for n in names]

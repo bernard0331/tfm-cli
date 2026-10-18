@@ -1,7 +1,7 @@
 """Compact text summary of a player's view of the game."""
 import time
 
-from . import data
+from . import data, value
 from .text import card_line, message
 
 RES = [("megacredits", "MC"), ("steel", "St"), ("titanium", "Ti"), ("plants", "Pl"), ("energy", "En"), ("heat", "He")]
@@ -90,12 +90,14 @@ def milestones(g, me, names, ctx):
     return lines
 
 
-def awards(g, me, names, ctx):
+def awards(g, me, names, ctx, view=None, history=None):
     aw = g["awards"]
     funded = [a for a in aw if a.get("playerName")]
     cost = [8, 14, 20][len(funded)] if len(funded) < 3 else None
     head = f"AWARDS ({len(funded)}/3 funded" + (f", next costs {cost} MC):" if cost else "):")
     lines = [head]
+    # Projected finish and funding value for open awards, while a slot is left.
+    outlook = value.Outlook(view) if view is not None and cost else None
     for a in aw:
         if len(funded) == 3 and not a.get("playerName"):
             continue
@@ -106,6 +108,10 @@ def awards(g, me, names, ctx):
         line += ": " + ", ".join(
             ("YOU" if s["color"] == me["color"] else names.get(s["color"], s["color"])) + f" {s['score']}" for s in ranked)
         lines.append(line)
+        if outlook is not None and not a.get("playerName"):
+            o = value.award_outlook(a, outlook, history)
+            if o:
+                lines.append("    → " + value.describe_award(o, outlook))
     return lines
 
 
@@ -142,7 +148,7 @@ def tableau(p):
     return ", ".join(out) or "none"
 
 
-def sections(view, ctx, new_logs):
+def sections(view, ctx, new_logs, award_history=None):
     """The summary as ordered chunks (key, always, lines).
 
     Chunks sharing a key form one section. Sections with always=True are printed on every turn;
@@ -201,7 +207,7 @@ def sections(view, ctx, new_logs):
 
     add("", True, "")
     add("milestones", False, *milestones(g, me, names, ctx))
-    add("awards", False, *awards(g, me, names, ctx))
+    add("awards", False, *awards(g, me, names, ctx, view, award_history))
     col = colonies(g, view, names, ctx if ONCE_COLONY_TEXT else None)
     if col:
         add("colonies", False, *col)
@@ -227,8 +233,8 @@ def section_name(key):
     return SECTION_NAMES.get(key, key)
 
 
-def summarize(view, ctx, new_logs):
-    return [line for _key, _always, lines in sections(view, ctx, new_logs) for line in lines]
+def summarize(view, ctx, new_logs, award_history=None):
+    return [line for _key, _always, lines in sections(view, ctx, new_logs, award_history) for line in lines]
 
 
 def section_hashes(chunks):

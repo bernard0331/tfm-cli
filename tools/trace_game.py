@@ -52,9 +52,9 @@ def run(argv):
     captured = []
     orig_summarize = digest.summarize
 
-    def recording_summarize(view, ctx, new_logs):
+    def recording_summarize(view, ctx, new_logs, award_history=None):
         captured.append({"view": copy.deepcopy(view), "seen": sorted(ctx.seen), "logs": list(new_logs)})
-        return orig_summarize(view, ctx, new_logs)
+        return orig_summarize(view, ctx, new_logs, award_history)
 
     digest.summarize = recording_summarize
 
