@@ -66,7 +66,19 @@ def leaves(waiting_for, ctx):
         return []
     out = []
     _expand(waiting_for, ctx, [], [], "", out, top=True)
+    if not out:
+        # Every listed choice was filtered out (e.g. all cards disabled): still offer the input itself, so the
+        # decision never prints without an option to answer it.
+        out.append(Leaf("1", _title(waiting_for, ctx), [], waiting_for, hint=needs(waiting_for, ctx)))
     return out
+
+
+def has_choices(waiting_for, ctx):
+    """True when the decision lists at least one choice of its own (see leaves' fallback)."""
+    out = []
+    if waiting_for is not None:
+        _expand(waiting_for, ctx, [], [], "", out, top=True)
+    return bool(out)
 
 
 def _title(node, ctx):

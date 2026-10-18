@@ -21,6 +21,7 @@ Two layers:
 The numbers are estimates for comparing options, not exact values. Effects the app implements with
 custom code are flagged so you read the card text yourself.
 """
+import copy
 import math
 import random
 import re
@@ -32,6 +33,10 @@ VP, CARD, BUY_COST = 5.0, 3.5, 3
 CITY_TILE, SPECIAL_TILE, COLONY = 5.0, 2.0, 10.0
 OCEAN_ADJACENCY = 2.0   # typical ocean-adjacency income on top of the ocean's TR
 PLANETARY = ("venus", "earth", "mars", "jovian", "moon")
+RESOURCES = ("megacredits", "steel", "titanium", "plants", "energy", "heat")
+_PROD_KEY = {"megacredits": "megacreditProduction", "steel": "steelProduction", "titanium": "titaniumProduction",
+             "plants": "plantProduction", "energy": "energyProduction", "heat": "heatProduction"}
+_STOCK_KEY = {r: ("megaCredits" if r == "megacredits" else r) for r in RESOURCES}
 
 # Underworld token bag (normal game, from the app's UnderworldExpansion.TOKEN_COUNTS).
 TOKEN_COUNTS = {
@@ -65,6 +70,117 @@ TR_PER_TAG = {
     "Terraforming Ganymede": {"tag": "jovian"},
     "Social Events": {"tag": "mars", "per": 2},
 }
+
+# Underground tokens that depict steel or titanium (Deepmining may only excavate these).
+STEEL_TOKENS = ("steel2plant", "steel1production", "steel2pertemp")
+TITANIUM_TOKENS = ("titaniumandplant", "titanium2", "titanium1production", "titanium1pertemp")
+
+
+def _raise_to_one(ctx):
+    """Industrial Complex: every production below 1 goes up to 1, from the player's production now."""
+    if ctx is None:
+        return {}
+    out = {}
+    for res in ("megacredits", "steel", "titanium", "plants", "energy", "heat"):
+        have = ctx.me.get(_PROD_KEY[res], 0) or 0
+        if have < 1:
+            out[res] = 1 - have
+    return out
+
+
+def _best_building_box(ctx):
+    """Robotic Workforce: the production box of your best building card (one whose result keeps every
+    production legal)."""
+    if ctx is None:
+        return {}
+    best, best_value = {}, 0.0
+    for name in ctx.tableau:
+        if name == "Robotic Workforce" or "building" not in (data.card(name) or {}).get("tags", []):
+            continue
+        box = (card_behavior(name, ctx).get("behavior") or {}).get("production") or {}
+        box = {r: n for r, n in box.items() if isinstance(n, (int, float))}
+        if not box or any((ctx.me.get(_PROD_KEY.get(r, ""), 0) or 0) + n < (-5 if r == "megacredits" else 0)
+                          for r, n in box.items()):
+            continue
+        worth = sum(n * _unit(r, ctx) * (ctx.plant_phases if r == "plants" else ctx.phases) for r, n in box.items())
+        if worth > best_value:
+            best, best_value = box, worth
+    return best
+
+
+def _oumuamua(ctx):
+    """Oumuamua Type Object Survey: 2 data anywhere; reveal 2 cards. The first science or microbe card is
+    played free; failing that, a space card gives 3 energy production. Cards not played are kept."""
+    cards = deck.deck((ctx.game["gameOptions"].get("expansions") if ctx else None) or {})
+    n = len(cards) or 1
+    sci = sum(1 for c in cards if {"science", "microbe"} & set(c.get("tags") or [])) / n
+    space = sum(1 for c in cards if "space" in (c.get("tags") or []) and
+                not {"science", "microbe"} & set(c.get("tags") or [])) / n
+    other = 1 - sci - space
+    free = sci + other * sci
+    energy = space + other * space
+    return {"behavior": {"addResourcesToAnyCard": {"type": "Data", "count": 2}, "drawCard": round(2 - free, 2),
+                         "freePlay": round(free, 2), "production": {"energy": round(3 * energy, 2)}}}
+
+
+# Effects the app implements in custom code (bespokePlay / bespokeAction), spelled out from the card text.
+# Each entry is merged over the exported behavior (a key here replaces the same key there); a callable gets
+# the Outlook (or None when there is none) and returns the entry.
+CUSTOM_BEHAVIORS = {
+    "Noctis City": {"behavior": {"production": {"energy": -1, "megacredits": 3}, "city": {}}},
+    "Lava Tube Settlement": {"behavior": {"city": {}}},
+    "Small Open Pit Mine": {"behavior": {"or": {"behaviors": [{"production": {"steel": 2}},
+                                                              {"production": {"titanium": 1}}]}}},
+    "Deepmining": {"behavior": {"or": {"behaviors": [
+        {"production": {"steel": 1}, "underworld": {"excavate": {"count": 1, "tokens": STEEL_TOKENS}}},
+        {"production": {"titanium": 1}, "underworld": {"excavate": {"count": 1, "tokens": TITANIUM_TOKENS}}}]}}},
+    # +5 TR now; skipping the first TR of every later action phase is priced by the skipFirstTR key.
+    "Preservation Program": {"behavior": {"tr": 5, "skipFirstTR": True}},
+    # Its own 2 microbe tags add 2 diseases at the start: lose 4 M€ each.
+    "Pharmacy Union": {"behavior": {"drawCard": {"count": 1, "tag": "science"}, "stock": {"megacredits": -8}}},
+    "Shipment to Earth": {"behavior": {"tr": 3, "stock": {"plants": -3, "steel": -3,
+                                                          "megacredits": {"tag": "earth", "each": 2}}}},
+    "Imported Hydrogen": {"behavior": {"ocean": {}, "or": {"behaviors": [
+        {"stock": {"plants": 3}, "title": "3 plants"},
+        {"addResourcesToAnyCard": {"type": "Microbe", "count": 3, "excludeThis": True}, "title": "3 microbes"},
+        {"addResourcesToAnyCard": {"type": "Animal", "count": 2, "excludeThis": True}, "title": "2 animals"}]}}},
+    "Potatoes": {"behavior": {"production": {"megacredits": 2}, "stock": {"plants": -2}}},
+    "Industrial Complex": lambda ctx: {"behavior": {"production": _raise_to_one(ctx)}},
+    "Robotic Workforce": lambda ctx: {"behavior": {"production": _best_building_box(ctx)}},
+    # One planet tag of your choice (not modelled) and 3 steps on that planetary track.
+    "Kickstarter": {"behavior": {"planetaryTrack": 3}},
+    "Oumuamua Type Object Survey": _oumuamua,
+    # Returning a played event is about as good as drawing a card you chose.
+    "Astra Mechanica": lambda ctx: {"behavior": {"drawCard": min(2, (ctx.tags.get("event", 0) if ctx else 0))}},
+    # Each action puts 2 resources on a held card or doubles them: about 2 M€ off a later card per use.
+    "Self-replicating Robots": {"action": {"stock": {"megacredits": 2}}},
+}
+
+
+def starting_mc(name, beh=None):
+    """A corporation's starting M€, or a prelude's M€ when its behavior does not already grant it as stock."""
+    info = data.card(name) or {}
+    if info.get("type") not in ("corporation", "prelude") or not info.get("startingMC"):
+        return 0
+    beh = beh if beh is not None else card_behavior(name)
+    if info["type"] == "prelude" and "megacredits" in ((beh.get("behavior") or {}).get("stock") or {}):
+        return 0
+    return info["startingMC"]
+
+
+def card_behavior(name, ctx=None):
+    """Behavior data for a card (as in behaviors.json) with CUSTOM_BEHAVIORS merged over it, standard
+    projects included. A merged entry sets "custom": the card text is modelled, so no manual note."""
+    beh = data.behavior(name) or ({"behavior": STANDARD_BEHAVIORS[name]} if name in STANDARD_BEHAVIORS else {})
+    custom = CUSTOM_BEHAVIORS.get(data.card_name(name) or name)
+    if custom is None:
+        return beh
+    custom = custom(ctx) if callable(custom) else custom
+    out = dict(beh, custom=True)
+    for key, part in custom.items():
+        out[key] = dict(beh.get(key) or {}, **part) if isinstance(part, dict) and key == "behavior" else part
+    return out
+
 
 # Well-known cards that pay their owner (or the acting player) when ANY player does something.
 ANY_PLAYER_TRIGGERS = {
@@ -127,7 +243,7 @@ class Outlook:
         self.remaining_steps = remaining
         # 8 heat = 1 temperature TR; 8 plants = a greenery (1 VP, plus 1 oxygen TR while oxygen is open).
         # Ambient keeps turning 8 heat into 1 TR after temperature is maxed.
-        ambient = any(c["name"] == "Ambient" for c in self.me.get("tableau") or [])
+        ambient = self.ambient = any(c["name"] == "Ambient" for c in self.me.get("tableau") or [])
         self.heat = self.tr / 8 if self.left["temperature"] or ambient else 0.0
         self.plant = (VP + self.tr) / 8 if self.left["oxygen"] else VP / 8
         self.steel = float(self.me.get("steelValue", 2))
@@ -255,21 +371,65 @@ def _best_target(ctx, resource_type, exclude=None, this_card=None):
     return best, best_name
 
 
+def best_option(or_beh, ctx, card_tags, card_name):
+    """The option of an "or" behavior worth most now (None if it has none)."""
+    best, best_value = None, None
+    for option in or_beh.get("behaviors", []):
+        trial = Valuation(card_name)
+        _apply(option, trial, ctx, card_tags, card_name)
+        if best_value is None or trial.value > best_value:
+            best, best_value = option, trial.value
+    return best
+
+
+def _best_track(ctx, steps):
+    """(track, M€) for the planetary track whose next `steps` rewards are worth most to you."""
+    best, best_value = None, 0.0
+    for track, pos in (ctx.game.get("pathfinders") or {}).items():
+        layout = data.planetary_tracks().get(track, [])
+        if pos is None or pos < 0 or not layout:
+            continue
+        worth = sum(_reward_value(r, ctx) for space in layout[pos + 1:pos + 1 + steps]
+                    for r in space.get("risingPlayer", []) + space.get("everyone", []))
+        if worth > best_value:
+            best, best_value = track, worth
+    return best, best_value
+
+
 def _apply(beh, v, ctx, card_tags, card_name, scale=1.0, label=""):
     """Price one Behavior dict into v. `scale` > 1 for repeated actions."""
     if not beh:
         return
     pre = f"{label}" if label else ""
     if "or" in beh:
-        best = None
-        for option in beh["or"].get("behaviors", []):
-            trial = Valuation(card_name)
-            _apply(option, trial, ctx, card_tags, card_name)
-            if best is None or trial.value > best.value:
-                best = trial
-        if best:
-            v.add(pre + "best option", best.value * scale)
+        option = best_option(beh["or"], ctx, card_tags, card_name)
+        if option is not None:
+            best = Valuation(card_name)
+            _apply(option, best, ctx, card_tags, card_name)
+            v.add(pre + "best option" + (f" ({option['title']})" if option.get("title") else ""), best.value * scale)
             v.raises = {k: v.raises[k] + best.raises[k] * scale for k in v.raises}
+            v.tiles = {k: v.tiles[k] + best.tiles[k] * scale for k in v.tiles}
+            for res, n in best.prod.items():
+                v.prod[res] = v.prod.get(res, 0) + n * scale
+            for res, n in best.stock.items():
+                v.stock[res] = v.stock.get(res, 0) + n * scale
+            v.tr += best.tr * scale
+            v.tokens += best.tokens * scale
+            v.draws += best.draws * scale
+            v.card_resources += best.card_resources * scale
+    if beh.get("skipFirstTR"):
+        # The first TR of each action phase is lost, this generation's included: a TR lost g generations from
+        # now is worth 1 VP plus the income phases after it.
+        g = ctx.gens_left
+        v.add(f"{pre}skips your first TR each generation ×{g}", -(g * VP + g * (g - 1) / 2) * scale)
+    if beh.get("planetaryTrack") and ctx.game.get("pathfinders"):
+        track, worth = _best_track(ctx, beh["planetaryTrack"])
+        if track:
+            v.add(f"{pre}{track} track +{beh['planetaryTrack']}", worth * scale)
+    if beh.get("freePlay"):
+        p = beh["freePlay"]
+        # A card played free is worth about its printed cost (the break-even reference).
+        v.add(f"{pre}free play of a revealed card (p≈{p:.2f})", p * deck.mean_cost(ctx.expansions) * scale)
     for key in ("spend", "lose"):
         if key in beh:
             spend = beh[key]
@@ -362,11 +522,14 @@ def _apply(beh, v, ctx, card_tags, card_name, scale=1.0, label=""):
         if "excavate" in uw:
             ex = uw["excavate"]
             n = int(ex if isinstance(ex, (int, float)) else _resolve(ex.get("count", 1), card_tags, ctx))
-            best = reachable_tokens(ctx)
-            known = [t for t, _ in best[:n] if token_value(t, ctx) > blind_dig_value(ctx)]
-            amount = sum(token_value(t, ctx) for t in known) + (n - len(known)) * blind_dig_value(ctx)
+            only = None if isinstance(ex, (int, float)) else ex.get("tokens")
+            # Identified tokens already claimed by earlier uses of the same action are gone (ctx.dug).
+            best = [h for h in reachable_tokens(ctx) if only is None or h[0] in only][int(getattr(ctx, "dug", 0)):]
+            blind = blind_dig_value(ctx, only)
+            known = [t for t, _ in best[:n] if token_value(t, ctx) > blind]
+            amount = sum(token_value(t, ctx) for t in known) + (n - len(known)) * blind
             v.tokens += n * scale
-            label = f"{pre}excavate {n}" + (f" (best known: {', '.join(known)})" if known else f" (blind ≈{blind_dig_value(ctx):.1f} each)")
+            label = f"{pre}excavate {n}" + (f" (best known: {', '.join(known)})" if known else f" (blind ≈{blind:.1f} each)")
             v.add(label, amount * scale)
             if best:
                 v.flags.append("identified tokens you can dig next to your tiles: " +
@@ -398,7 +561,7 @@ def value_card(name, ctx, cost=None, buying=False, model=None, nested=False):
     `nested` is for valuations made inside another one (a hand card it unlocks): it skips unlock pricing,
     which would value cards again."""
     info = data.card(name) or {}
-    beh = data.behavior(name) or ({"behavior": STANDARD_BEHAVIORS[name]} if name in STANDARD_BEHAVIORS else {})
+    beh = card_behavior(name, ctx)
     v = Valuation(name)
     v.info = info
     ctype = info.get("type")
@@ -407,7 +570,7 @@ def value_card(name, ctx, cost=None, buying=False, model=None, nested=False):
     v.persistent_tags = persistent
     v.event_tags = tags if ctype == "event" else []
 
-    if ctype in ("corporation", "prelude") and info.get("startingMC"):
+    if starting_mc(name, beh):
         v.add("starting M€" if ctype == "corporation" else "M€", info["startingMC"])
     if beh.get("behavior"):
         _apply(beh["behavior"], v, ctx, persistent, name)
@@ -444,18 +607,7 @@ def value_card(name, ctx, cost=None, buying=False, model=None, nested=False):
 
     action = beh.get("action")
     if action:
-        trial = Valuation(name)
-        _apply(action, trial, ctx, persistent, name)
-        per_use = trial.value
-        uses = ctx.gens_left
-        if per_use > 0:
-            v.add(f"action ×{uses} (≈{per_use:.1f} each)", per_use * uses)
-            for k in v.raises:
-                v.raises[k] += trial.raises[k] * uses
-            v.tr += trial.tr * uses
-            v.card_resources += trial.card_resources * uses
-        else:
-            v.flags.append(f"its action is worth ≈{per_use:.1f} M€ per use at current rates")
+        _price_action(action, v, ctx, persistent, name, model)
     if beh.get("tr") and not beh.get("behavior", {}).get("tr") and beh.get("bespokePlay"):
         tr = beh["tr"]
         steps = sum(min(tr.get(k, 0), ctx.left.get({"oceans": "oceans"}.get(k, k), 99)) for k in ("temperature", "oxygen", "venus", "oceans")) + tr.get("tr", 0)
@@ -471,9 +623,9 @@ def value_card(name, ctx, cost=None, buying=False, model=None, nested=False):
         per = f" ÷ {tr_count['per']}" if tr_count.get("per") else ""
         v.add(f"{steps:g} TR from {tr_count['tag']} tags{per}, including this", steps * ctx.tr)
         v.tr += steps
-    elif beh.get("bespokePlay"):
+    elif beh.get("bespokePlay") and not beh.get("custom"):
         v.manual.append("part of its play effect is custom code: read the card text")
-    if beh.get("bespokeAction"):
+    if beh.get("bespokeAction") and not beh.get("custom"):
         v.manual.append("its action is custom code: read the card text")
     if beh.get("triggers") and not (name in OWN_TRIGGERS and name not in ctx.tableau):  # else priced in _plan
         v.manual.append("ongoing effect (" + ", ".join(beh["triggers"]) + "): value depends on future plays")
@@ -494,6 +646,106 @@ def value_card(name, ctx, cost=None, buying=False, model=None, nested=False):
     v.net = v.value - v.paid
     v.ratio = (v.value / v.paid) if v.paid else None
     return v
+
+
+def _later(ctx, g):
+    """A copy of ctx as seen g generations from now: fewer generations left, and the steps left on each global
+    parameter reduced at the table's pace (rounded to whole steps)."""
+    c = copy.copy(ctx)
+    c.gens_left = max(1, ctx.gens_left - g)
+    c.phases = c.gens_left - 1
+    c.tr = VP + c.phases
+    c.plant_phases = c.gens_left
+    c.left = {p: max(0, round(n - _param_rate(p, ctx) * g)) for p, n in ctx.left.items()}
+    c.temp = max(ctx.temp, 8 - 2 * c.left["temperature"])
+    c.oxygen = max(ctx.oxygen, 14 - c.left["oxygen"])
+    c.oceans = max(ctx.oceans, 9 - c.left["oceans"])
+    if ctx.expansions.get("venus"):
+        c.venus = max(ctx.venus, 30 - 2 * c.left["venus"])
+    c.heat = c.tr / 8 if c.left["temperature"] > 0 or ctx.ambient else 0.0
+    c.plant = (VP + c.tr) / 8 if c.left["oxygen"] > 0 else VP / 8
+    return c
+
+
+_ACTION_INPUTS = ("steel", "titanium", "plants", "energy", "heat")
+
+
+def _energy_demand(ctx, exclude):
+    """Energy your other played cards' actions spend each generation (they already have first call on it)."""
+    total = 0
+    for name in ctx.tableau:
+        if name == exclude:
+            continue
+        action = card_behavior(name).get("action") or {}
+        options = action["or"].get("behaviors", []) if "or" in action else [action]
+        spends = [o.get("spend", {}).get("energy", 0) for o in options]
+        total += max([n for n in spends if isinstance(n, (int, float))] or [0])
+    return total
+
+
+def _price_action(action, v, ctx, tags, name, model):
+    """Price a repeatable action as one use per generation left, played out generation by generation:
+    each use needs its inputs (resources here, and steel/titanium/plants/heat stock and production, or this
+    generation's energy, since unspent energy turns into heat), resources added here only pay through a
+    later conversion or the card's VP, and each use is priced at the rates of the generation it happens in."""
+    G = ctx.gens_left
+    owned = name in ctx.tableau
+    options = action["or"].get("behaviors", []) if "or" in action else [action]
+    vp = card_behavior(name).get("vp")
+    per_res = 0.0
+    if isinstance(vp, dict) and "resourcesHere" in vp:
+        per_res = VP / (vp.get("per") or (vp["resourcesHere"] if isinstance(vp["resourcesHere"], int) else 1) or 1)
+    here = ((model or ctx.tableau.get(name) or {}).get("resources") or 0) + (0 if owned else v.card_resources)
+    inputs = sorted({r for o in options for r in (o.get("spend") or {}) if r in _ACTION_INPUTS})
+    stock = {r: float(ctx.me.get(_STOCK_KEY[r], 0) or 0) for r in inputs}
+    income = {r: float(ctx.me.get(_PROD_KEY[r], 0) or 0) + (0 if owned else v.prod.get(r, 0)) for r in inputs}
+    demand = {r: (_energy_demand(ctx, name) if r == "energy" else 0) for r in inputs}
+    stock = {r: max(0.0, stock[r] - demand[r]) for r in inputs}
+    converts = any((o.get("spend") or {}).get("resourcesHere") for o in options)
+    total, uses, dug, short = 0.0, 0, 0, False
+    for g in range(G):
+        cg = _later(ctx, g)
+        cg.dug = dug
+        picks, lacking = [], False
+        for opt in options:
+            spend = opt.get("spend") or {}
+            need = _resolve(spend.get("resourcesHere", 0), tags, cg)
+            if any(_resolve(spend[r], tags, cg) > stock[r] + 1e-9 for r in inputs if r in spend):
+                lacking = True
+                continue
+            if need > here:
+                continue
+            trial = Valuation(name)
+            _apply({k: x for k, x in opt.items() if k not in ("addResources", "title")}, trial, cg, tags, name)
+            add = _resolve(opt.get("addResources", 0), tags, cg)
+            worth = trial.value + (add - need) * per_res
+            # Adding fuel for a later conversion is worth nothing by itself but keeps the action going.
+            if worth > 1e-9 or (add and converts and not need):
+                picks.append((bool(need), worth, opt, trial, add, need))
+        short = short or (lacking and not picks)
+        if picks:
+            conversions = [p for p in picks if p[0]]
+            _, worth, opt, trial, add, need = max(conversions or picks, key=lambda p: p[1])
+            total += worth
+            uses += 1
+            here += add - need
+            dug += trial.tokens
+            v.tokens += trial.tokens
+            v.card_resources += add
+            v.draws += trial.draws
+            v.tr += trial.tr
+            for k in v.raises:
+                v.raises[k] += trial.raises[k]
+            for r in inputs:
+                stock[r] -= _resolve((opt.get("spend") or {}).get(r, 0), tags, cg)
+        for r in inputs:
+            # Production phase: energy left over becomes heat, other resources carry over.
+            stock[r] = max(0.0, income[r] - demand[r]) if r == "energy" else stock[r] + income[r]
+    if total > 0:
+        limited = f" of {G}, short of {'/'.join(inputs)}" if short else ""
+        v.add(f"action ×{uses}{limited} (≈{total / uses:.1f} each)", total)
+    else:
+        v.flags.append("its action pays nothing at current rates and resources")
 
 
 # --------------------------------------------------------------------------------------------- underworld
@@ -541,8 +793,10 @@ def _bag(ctx):
     return bag
 
 
-def blind_dig_value(ctx):
+def blind_dig_value(ctx, only=None):
     bag = _bag(ctx)
+    if only is not None:
+        bag = {t: n for t, n in bag.items() if t in only}
     total = sum(bag.values())
     return sum(n * token_value(t, ctx) for t, n in bag.items()) / total if total else 0.0
 
@@ -609,7 +863,35 @@ def requirement_status(req, ctx, extra_tags=()):
         if have is None:
             return None, req
         return (have <= n if m.group(1) else have >= n), f"{m.group(2)} {have} (needs {'≤' if m.group(1) else '≥'}{n})"
+    m = re.match(r"^(max )?(undergroundTokens|corruption) (\d+)$", req)
+    if m:
+        n, uw = int(m.group(3)), ctx.me.get("underworldData") or {}
+        have = len(uw.get("tokens") or []) if m.group(2) == "undergroundTokens" else uw.get("corruption", 0) or 0
+        label = "underground tokens" if m.group(2) == "undergroundTokens" else "corruption"
+        return (have <= n if m.group(1) else have >= n), f"{label} {have}/{n}"
+    m = re.match(r"^(\d+) (megacredits|steel|titanium|plants|energy|heat) production$", req)
+    if m:
+        n, have = int(m.group(1)), ctx.me.get(_PROD_KEY[m.group(2)], 0) or 0
+        return have >= n, f"{m.group(2)} production {have}/{n}"
     return None, req
+
+
+def stock_shortfall(stock, ctx):
+    """Text for the first resource this card spends from your stock that you do not have (None if none)."""
+    for res, n in stock.items():
+        have = ctx.me.get(_STOCK_KEY.get(res, ""), 0) or 0
+        if isinstance(n, (int, float)) and n < 0 and have + n < 0:
+            return f"needs {-n:g} {res} to lose (have {have:g})"
+    return None
+
+
+def production_shortfall(prod, ctx):
+    """Text for the first production this card lowers below what you have (None if all are legal)."""
+    for res, n in prod.items():
+        have = ctx.me.get(_PROD_KEY.get(res, ""), 0) or 0
+        if n < 0 and have + n < (-5 if res == "megacredits" else 0):
+            return f"needs {-n:g} {res} production to give up (have {have:g})"
+    return None
 
 
 def _requirements(v, ctx):
@@ -619,6 +901,9 @@ def _requirements(v, ctx):
             v.flags.append(f"NOT PLAYABLE YET: {text}")
         elif met is None and "any player" not in req:
             v.manual.append(f"check requirement: {req}")
+    short = production_shortfall(v.prod, ctx) or stock_shortfall(v.stock, ctx)
+    if short and v.info.get("type") in PROJECT:
+        v.flags.append(f"NOT PLAYABLE YET: {short}")
 
 
 def _reward_value(reward, ctx):
@@ -1001,7 +1286,8 @@ def _metric_delta(metric, v, ctx):
         "notags": 1 if not info.get("tags") and ctype in ("automated", "active") else 0,
         "distinct": len({t for t in v.persistent_tags if t not in ("event", "wild", "clone")}
                         - {t for t, n in ctx.tags.items() if n and t not in ("event",)}),
-        "hand": v.draws - 1, "card_resources": v.card_resources, "tokens": v.tokens,
+        # Every play empties a hand slot whichever card it is, so only cards drawn move the count.
+        "hand": v.draws, "card_resources": v.card_resources, "tokens": v.tokens,
     }.get(metric)
 
 
@@ -1052,35 +1338,47 @@ def _award_points(scores, n_players):
 
 
 def _awards(v, ctx):
-    aw = ctx.game.get("awards") or []
-    funded = sum(1 for a in aw if a.get("playerName"))
-    for a in aw:
-        if funded >= 3 and not a.get("playerName"):
-            continue
+    """Funded awards this card moves you in. The value is the change in the VP you can expect from the award at
+    game end (award_outlook with your count moved), not today's standings: a lead now can still change hands.
+    Unfunded awards are left to the funding advice (describe_award)."""
+    for a in ctx.game.get("awards") or []:
         metric = _AWARD_METRICS.get(a["name"])
-        if not metric:
+        if not a.get("playerName") or not metric:
             continue
         delta = _metric_delta(metric, v, ctx)
-        if not delta:
-            continue
         scores = {s["color"]: s["score"] for s in a.get("scores", [])}
-        if ctx.me["color"] not in scores:
+        if not delta or ctx.me["color"] not in scores:
             continue
+        me = ctx.me["color"]
         before = _award_points(scores, len(ctx.players))
-        after_scores = dict(scores)
-        after_scores[ctx.me["color"]] += delta
+        after_scores = dict(scores, **{me: scores[me] + delta})
         after = _award_points(after_scores, len(ctx.players))
-        mine = after[ctx.me["color"]] - before[ctx.me["color"]]
-        rival_changes = [f"{ctx.names[c]} {after[c] - before[c]:+d}" for c in scores
-                         if c != ctx.me["color"] and after[c] != before[c]]
-        status = "funded" if a.get("playerName") else "not funded"
-        text = f"{a['name']} ({status}): you {scores[ctx.me['color']]}→{after_scores[ctx.me['color']]}"
-        if mine or rival_changes:
-            text += f": you {mine:+d} VP" + (f", {', '.join(rival_changes)} VP" if rival_changes else "")
-            if a.get("playerName") and mine:
-                v.add(f"{a['name']} award position", mine * VP)
-            v.flags.append("AWARD " + text)
+        mine = after[me] - before[me]
+        expected = _award_shift(a, delta, ctx)
+        if expected is None:
+            expected = mine
+        if abs(expected) >= 0.05:
+            v.add(f"{a['name']} award (expected at game end)", expected * VP)
+        rival_changes = [f"{ctx.names[c]} {after[c] - before[c]:+d}" for c in scores if c != me and after[c] != before[c]]
+        if mine or rival_changes or abs(expected) >= 0.5:
+            v.flags.append(f"AWARD {a['name']} (funded): you {scores[me]}→{after_scores[me]}: you {mine:+d} VP" +
+                           (f", {', '.join(rival_changes)} VP" if rival_changes else "") +
+                           f" now; ≈{expected:+.1f} VP expected at game end")
 
+
+def _award_shift(award, delta, ctx):
+    """Change in your expected award VP at game end when your count moves by delta (None if not projectable)."""
+    cache = ctx.__dict__.setdefault("_award_base", {})
+    if award["name"] not in cache:
+        cache[award["name"]] = award_outlook(award, ctx)
+    base = cache[award["name"]]
+    me = ctx.me["color"]
+    moved = dict(award, scores=[dict(s, score=s["score"] + delta) if s["color"] == me else s
+                                for s in award.get("scores", [])])
+    shifted = award_outlook(moved, ctx)
+    if base is None or shifted is None:
+        return None
+    return shifted["points"][me] - base["points"][me]
 
 
 # --------------------------------------------------------------------------------------------- planned tableau
@@ -1140,7 +1438,7 @@ def _play_counts(name):
     for t in set(tags):
         counts[f"tag:{t}"] = tags.count(t)
         counts[f"card:{t}"] = 1
-    beh = (data.behavior(name) or {}).get("behavior") or {}
+    beh = card_behavior(name).get("behavior") or {}
     steps = dict(beh.get("global") or {})
     oceans = (beh["ocean"].get("count", 1) if isinstance(beh["ocean"], dict) else 1) if "ocean" in beh else 0
     counts.update({"ocean": oceans, "city": 1 if "city" in beh else 0, "greenery": 1 if "greenery" in beh else 0,
@@ -1219,7 +1517,7 @@ def _money(ctx):
     """M€ you can still spend this game: what you hold plus income at each spendable production phase.
     Steel and titanium count at full value, as if every card could use them."""
     me = ctx.me
-    income = me.get("terraformRating", 20) + me.get("megaCreditProduction", 0) + \
+    income = me.get("terraformRating", 20) + me.get("megacreditProduction", 0) + \
         me.get("steelProduction", 0) * ctx.steel + me.get("titaniumProduction", 0) * ctx.titanium
     held = me.get("megaCredits", 0) + me.get("steel", 0) * ctx.steel + me.get("titanium", 0) * ctx.titanium
     return held + income * ctx.phases
@@ -1572,7 +1870,19 @@ def _rival_triggers(v, ctx):
             elif p["color"] != ctx.me["color"]:
                 beh = data.behavior(card["name"]) or {}
                 if any(t.endswith("ByAnyPlayer") for t in beh.get("triggers", [])) and card["name"] not in ANY_PLAYER_TRIGGERS:
-                    v.flags.append(f"{p['name']}'s {card['name']} reacts to other players' plays: check whether this triggers it")
+                    # The same for every card valued: noted once per output (ctx.notes), not per card.
+                    note(ctx, f"{p['name']}'s {card['name']} reacts to other players' plays: check what triggers it")
+
+
+def note(ctx, text):
+    """A context note that applies to every card valued against ctx: printed once (see notes())."""
+    notes = ctx.__dict__.setdefault("notes", [])
+    if text not in notes:
+        notes.append(text)
+
+
+def notes(ctx):
+    return [f"⚑ {n}" for n in getattr(ctx, "notes", [])]
 
 
 def _attack(v, ctx):

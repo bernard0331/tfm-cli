@@ -36,17 +36,27 @@ def _enabled(expansions):
 
 
 @lru_cache(maxsize=None)
-def _deck(modules):
-    """Project cards in a game with these modules. A variant such as "Ecological Zone:ares" replaces its base
-    card when its module is in, as the app's GameCards does."""
+def _names(modules):
+    """Names of the project cards in a game with these modules. A variant such as "Ecological Zone:ares"
+    replaces its base card when its module is in, as the app's GameCards does."""
     cards = {k: c for k, c in data.cards().items() if c.get("type") in PROJECT_TYPES and c.get("module") in modules}
     replaced = {k.split(":")[0] for k in cards if ":" in k}
-    return tuple(c for k, c in cards.items() if k not in replaced)
+    return tuple(k for k in cards if k not in replaced)
+
+
+@lru_cache(maxsize=None)
+def _deck(modules):
+    return tuple(data.cards()[k] for k in _names(modules))
 
 
 def deck(expansions):
     """Project cards in the deck for a `gameOptions.expansions` dict."""
     return _deck(_enabled(expansions or {}))
+
+
+def names(expansions):
+    """Names of the project cards in the deck for a `gameOptions.expansions` dict."""
+    return _names(_enabled(expansions or {}))
 
 
 def _per_card(card, event):

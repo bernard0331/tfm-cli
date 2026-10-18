@@ -139,7 +139,11 @@ class Context(unittest.TestCase):
         ]}
         ctx = value.Outlook(view(pathfinders={"earth": 21}, awards=[aw]))
         v = value.value_card("Sponsors", ctx)
-        self.assertIn(("Cultivator award position", 15), v.parts)
+        # Tying first today would be +3 VP (15 M€); with generations left the lead can still change hands, so the
+        # expected gain at game end is positive but smaller.
+        amount = dict(v.parts)["Cultivator award (expected at game end)"]
+        self.assertGreater(amount, 0)
+        self.assertLess(amount, 15)
 
     def test_track_city_triggers_rival_cards(self):
         vw = view(pathfinders={"mars": 16})
@@ -414,6 +418,167 @@ class PlannedTableau(unittest.TestCase):
             base = self.worth("Point Luna", []).value
         with draws(lambda ctx, event: 2.0 if event == "tag:earth" else 0.0):
             self.assertAlmostEqual(self.worth("Point Luna", []).value, base + 2 * value.CARD)
+
+
+
+def me(vw, **fields):
+    vw["thisPlayer"].update(fields)
+    return vw
+
+
+def action_part(v):
+    return next(amount for label, amount in v.parts if label.startswith("action ×"))
+
+
+class LiveGameFixes(unittest.TestCase):
+    """Estimates two agent seats found wrong in a live 3-player game (g506b18d8ce00)."""
+
+    # --- requirements and production given up
+    def test_production_to_give_up_is_a_requirement(self):
+        # Noctis City lowers energy production 1 step (custom code in the app).
+        v = value.value_card("Noctis City", value.Outlook(me(view(), energyProduction=0)))
+        self.assertIn("NOT PLAYABLE YET: needs 1 energy production to give up (have 0)", v.flags)
+        self.assertTrue(any(label.startswith("city tile") for label, _ in v.parts), v.parts)
+        v = value.value_card("Noctis City", value.Outlook(me(view(), energyProduction=1)))
+        self.assertFalse(any(f.startswith("NOT PLAYABLE") for f in v.flags), v.flags)
+
+    def test_underground_token_requirement(self):
+        ctx = value.Outlook(view())
+        self.assertEqual(value.requirement_status("undergroundTokens 3", ctx)[0], False)
+        ctx = value.Outlook(me(view(), underworldData={"corruption": 0, "tokens": [{"token": "nothing"}] * 3}))
+        self.assertEqual(value.requirement_status("undergroundTokens 3", ctx)[0], True)
+        self.assertEqual(value.requirement_status("2 titanium production", value.Outlook(me(view(), titaniumProduction=2)))[0], True)
+
+    # --- penalties
+    def test_preservation_program_prices_the_skipped_tr(self):
+        ctx = value.Outlook(view(), gens_left=8)
+        v = value.value_card("Preservation Program", ctx)
+        # 5 TR now; a TR skipped g generations from now loses 1 VP and the income phases after it.
+        self.assertAlmostEqual(dict(v.parts)["skips your first TR each generation ×8"], -(8 * 5 + 8 * 7 / 2))
+        self.assertAlmostEqual(v.value, 5 * ctx.tr - (8 * 5 + 8 * 7 / 2))
+        self.assertFalse(any("custom code" in m for m in v.manual), v.manual)
+
+    def test_pharmacy_union_starts_with_two_diseases(self):
+        v = value.value_card("Pharmacy Union", value.Outlook(view()))
+        self.assertIn(("-8 megacredits", -8), v.parts)
+
+    def test_prelude_megacredits_count_once(self):
+        # Donation's 21 M€ is both its startingMC and a stock behavior in the exported data.
+        self.assertAlmostEqual(value.value_card("Donation", value.Outlook(view())).value, 21)
+
+    def test_industrial_complex_raises_low_productions(self):
+        ctx = value.Outlook(view(), gens_left=8)
+        v = value.value_card("Industrial Complex", ctx)
+        expected = -18 + 7 * (1 + ctx.steel + ctx.titanium + ctx.energy + ctx.heat) + 8 * ctx.plant
+        self.assertAlmostEqual(v.value, expected)
+        rich = {f"{r}Production": 2 for r in ("steel", "titanium", "plant", "energy", "heat")}
+        v = value.value_card("Industrial Complex", value.Outlook(me(view(), megacreditProduction=-2, **rich), gens_left=8))
+        self.assertAlmostEqual(v.value, -18 + 3 * 7)  # only M€ production is below 1: -2 → 1
+
+    # --- award noise
+    def test_hand_award_only_moves_with_cards_drawn(self):
+        aw = {"name": "Visionary", "playerName": "p1", "scores": [
+            {"color": "red", "score": 2}, {"color": "green", "score": 3}, {"color": "blue", "score": 2},
+            {"color": "yellow", "score": 0}]}
+        ctx = value.Outlook(view(awards=[aw]))
+        for name in ("Dust Seals", "Hadesphere", "Supply Drop"):
+            v = value.value_card(name, ctx)
+            self.assertFalse(any("Visionary" in label for label, _ in v.parts), (name, v.parts))
+            self.assertFalse(any("Visionary" in f for f in v.flags), (name, v.flags))
+        v = value.value_card("Business Network", ctx)  # its action draws cards
+        self.assertTrue(any("Visionary" in label for label, _ in v.parts), v.parts)
+
+    def test_award_value_is_capped_by_the_end_game_projection(self):
+        aw = {"name": "Celebrity", "playerName": "p0", "scores": [
+            {"color": "red", "score": 4}, {"color": "green", "score": 4}, {"color": "blue", "score": 4},
+            {"color": "yellow", "score": 0}]}
+        v = value.value_card("16 Psyche", value.Outlook(view(awards=[aw]), gens_left=5))
+        amount = dict(v.parts)["Celebrity award (expected at game end)"]
+        self.assertGreater(amount, 0)
+        self.assertLess(amount, 5 * value.VP)
+
+    def test_unfunded_awards_are_not_flagged_per_card(self):
+        aw = {"name": "Space Baron", "scores": [{"color": c, "score": 0} for c in ("red", "green", "blue", "yellow")]}
+        v = value.value_card("16 Psyche", value.Outlook(view(awards=[aw])))
+        self.assertFalse(any("Space Baron" in f for f in v.flags), v.flags)
+
+    def test_rival_reaction_is_noted_once_per_output(self):
+        vw = view()
+        vw["players"][1]["tableau"] = [{"name": "United Nations Mission One"}]
+        ctx = value.Outlook(vw)
+        for name in ("Asteroid", "Dust Seals", "Mine"):
+            v = value.value_card(name, ctx)
+            self.assertFalse(any("reacts" in f for f in v.flags), v.flags)
+        self.assertEqual(value.notes(ctx), ["⚑ p1's United Nations Mission One reacts to other players' plays: "
+                                            "check what triggers it"])
+
+    # --- repeated actions
+    def test_resource_conversion_action_needs_three_microbes_per_tr(self):
+        ctx = value.Outlook(view(temperature=-30, oxygen=0, oceans=0), gens_left=6)
+        v = value.value_card("Nitrite Reducing Bacteria", ctx)
+        # Starts with 3 microbes: TR now (5 VP + 5 phases), then 3 adds, then a TR with 1 phase left, then an add.
+        self.assertAlmostEqual(action_part(v), 10 + 6)
+
+    def test_energy_actions_need_energy_each_generation(self):
+        # Unspent energy turns into heat, so 1 energy production never pays for a 3-energy action.
+        flat = view(temperature=-30, oxygen=0, oceans=4)
+        v = value.value_card("Water Splitting Plant", value.Outlook(me(flat, energyProduction=1), gens_left=6))
+        self.assertFalse(any(label.startswith("action ×") for label, _ in v.parts), v.parts)
+        ctx = value.Outlook(me(view(temperature=-30, oxygen=0, oceans=4), energyProduction=3, energy=3), gens_left=6)
+        self.assertTrue(action_part(value.value_card("Water Splitting Plant", ctx)) > 0)
+        # Energy your played Ironworks already spends is not available again.
+        vw = me(view(temperature=-30, oxygen=0, oceans=4), energyProduction=4, energy=4)
+        vw["thisPlayer"]["tableau"] = [{"name": "Ironworks"}]
+        v = value.value_card("Water Splitting Plant", value.Outlook(vw, gens_left=6))
+        self.assertFalse(any(label.startswith("action ×") for label, _ in v.parts), v.parts)
+
+    def test_identified_token_is_dug_once(self):
+        vw = view(temperature=-30, oxygen=0, oceans=0)
+        vw["game"]["gameOptions"]["boardName"] = "tharsis"
+        vw["game"]["spaces"] = [{"id": "10", "tileType": 2, "color": "red"},
+                                {"id": "11", "undergroundResource": "plant1production"}]
+        ctx = value.Outlook(vw, gens_left=6)
+        v = value.value_card("Hadesphere", ctx)
+        token = value.token_value("plant1production", ctx)
+        expected = token + sum(value.blind_dig_value(value._later(ctx, g)) for g in range(1, 6))
+        self.assertAlmostEqual(action_part(v), expected)
+        self.assertLess(action_part(v), 6 * token)
+
+    # --- combos and custom code
+    def test_hand_city_counts_for_tile_triggers(self):
+        vw = me(view(hand=[{"name": "Lava Tube Settlement", "calculatedCost": 15}]), megaCredits=40)
+        v = value.value_card("Rover Construction", value.Outlook(vw))
+        label, amount = v.combo[0]
+        self.assertTrue(label.startswith("effect ×") and amount > 0, v.combo)
+
+    def test_custom_code_cards_from_the_table(self):
+        ctx = value.Outlook(me(view(), energyProduction=1), gens_left=6)
+        steel, ti = 2 * ctx.steel * ctx.phases, ctx.titanium * ctx.phases
+        self.assertAlmostEqual(value.value_card("Small Open Pit Mine", ctx).value, max(steel, ti))
+        self.assertGreater(value.value_card("Deepmining", ctx).value, ctx.steel * ctx.phases)
+        vw = me(view(), energyProduction=1)
+        vw["thisPlayer"]["tableau"] = [{"name": "Commercial District"}]
+        rw = value.value_card("Robotic Workforce", value.Outlook(vw, gens_left=6))
+        self.assertEqual(rw.prod, {"energy": -1, "megacredits": 4})
+        self.assertGreater(value.value_card("Oumuamua Type Object Survey", ctx).value, 2 * value.CARD)
+        self.assertAlmostEqual(value.value_card("Astra Mechanica", value.Outlook(view(tags={"event": 3}))).value, 2 * value.CARD)
+        tracks = {"venus": 0, "earth": 0, "mars": 0, "jovian": 0, "moon": -1}
+        self.assertGreater(value.value_card("Kickstarter", value.Outlook(view(pathfinders=tracks))).value, 0)
+        for name in ("Small Open Pit Mine", "Deepmining", "Robotic Workforce", "Kickstarter", "Lava Tube Settlement",
+                     "Oumuamua Type Object Survey", "Astra Mechanica", "Self-replicating Robots"):
+            v = value.value_card(name, ctx)
+            self.assertFalse(any("custom code" in m for m in v.manual), (name, v.manual))
+
+    def test_imported_hydrogen_counts_its_plants(self):
+        ctx = value.Outlook(view(oceans=4, oxygen=1))
+        v = value.value_card("Imported Hydrogen", ctx)
+        self.assertIn(("best option (3 plants)", 3 * ctx.plant), v.parts)
+
+    def test_stock_to_lose_is_a_requirement(self):
+        v = value.value_card("Shipment to Earth", value.Outlook(view()))
+        self.assertTrue(any(f.startswith("NOT PLAYABLE YET: needs 3 plants") for f in v.flags), v.flags)
+        v = value.value_card("Shipment to Earth", value.Outlook(me(view(), plants=3, steel=3)))
+        self.assertFalse(any(f.startswith("NOT PLAYABLE") for f in v.flags), v.flags)
 
 
 if __name__ == "__main__":

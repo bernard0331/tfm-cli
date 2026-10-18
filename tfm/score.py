@@ -144,7 +144,30 @@ def count_vp_trades(game, logs):
     return counts
 
 
-def report(view, vp_trades=None):
+# Standard projects that turn M€ into points: (cost, global parameter it needs open or None, VP when it is open,
+# VP when it is not). Rule costs; ocean adjacency M€ and city adjacency for greeneries are left out.
+SP_POINTS = (("Asteroid", 14, "temperature", 1, 0), ("Aquifer", 18, "oceans", 1, 0), ("Greenery", 23, "oxygen", 2, 1))
+
+
+def final_gen_upside(player, game):
+    """(VP, text): a rough count of what a player can still add in the last generation from what they hold:
+    plants (plus plant production, converted after the final production phase) into greeneries, heat into
+    temperature steps, and M€ into the cheapest standard project per VP. Cards in hand are not counted."""
+    left = {"temperature": max(0, (8 - game["temperature"]) // 2), "oxygen": max(0, 14 - game["oxygenLevel"]),
+            "oceans": max(0, 9 - game["oceans"])}
+    greeneries = int(player.get("plants", 0) + player.get("plantProduction", 0)) // 8
+    green_vp = greeneries + min(greeneries, left["oxygen"])
+    heat_vp = min(int(player.get("heat", 0)) // 8, left["temperature"])
+    rates = [cost / (vp if left.get(param) else vp_closed) for _, cost, param, vp, vp_closed in SP_POINTS
+             if (vp if left.get(param) else vp_closed)]
+    mc_vp = int(player.get("megaCredits", 0) / min(rates)) if rates else 0
+    total = green_vp + heat_vp + mc_vp
+    bits = [f"{greeneries} greenery" if greeneries else "", f"{heat_vp} heat TR" if heat_vp else "",
+            f"{mc_vp} from {player.get('megaCredits', 0)} M€" if mc_vp else ""]
+    return total, ", ".join(b for b in bits if b)
+
+
+def report(view, vp_trades=None, final=False):
     """Lines for `tfm vp`: every player's estimate, best first, with your exact score from the app."""
     me = view["thisPlayer"]
     rows = []
@@ -167,6 +190,10 @@ def report(view, vp_trades=None):
         trades = (vp_trades or {}).get(p["color"], 0)
         if trades and p["color"] != me["color"]:
             line += f" (+? from {trades} trade(s) with {', '.join(sorted(vp_trade_colonies(view['game'])))}: 0-2 VP each)"
+        if final:
+            upside, why = final_gen_upside(p, view["game"])
+            if upside:
+                line += f" · last generation +~{upside} ({why})"
         out.append(line)
     out.append("  Not counted for rivals: planetary-track and Moon VP, and the time penalty.")
     return out

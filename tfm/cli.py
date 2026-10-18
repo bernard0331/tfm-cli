@@ -101,6 +101,8 @@ def _print_values(view, names=None, gens=None):
     results = [(value.value_card(name, ctx, buying=buying, model=model), where) for name, model, buying, where in rows]
     for v, where in sorted(results, key=lambda r: -r[0].net):
         print("\n".join(value.describe(v, where)))
+    for line in value.notes(ctx):
+        print(line)
 
 
 def _record_awards(seat, view):
@@ -266,7 +268,8 @@ def cmd_vp(args):
         for g in range(1, view["game"]["generation"] + 1):
             logs.extend(client.logs(g) or [])
         trades = score.count_vp_trades(view["game"], logs)
-    print("\n".join(score.report(view, trades)))
+    final = view["game"]["phase"] != "end" and value.Outlook(view).gens_left <= 1
+    print("\n".join(score.report(view, trades, final=final)))
 
 
 def cmd_options(args):
@@ -323,6 +326,7 @@ def cmd_play(args):
     print(f"OK: [{leaf.id}] {leaf.label}" + (f" {args.values}" if args.values else ""))
     if args.debug:
         print(json.dumps(response))
+    new_view = _settled_view(client, new_view, ctx)
     for entry in _new_logs(client, seat, new_view):
         print("  " + message(entry, ctx.names))
     me = new_view["thisPlayer"]
@@ -337,6 +341,15 @@ def cmd_play(args):
         seat.pop("fp", None)
         print("Your turn is done. Run `tfm turn` to wait for your next decision.")
     _finish(seat, ctx)
+
+
+def _settled_view(client, view, ctx):
+    """The view to show after a submit. The submit response can lack the next decision or list none of its
+    choices (seen after Robotic Workforce and Venus Waystation); the player view then has them, so fetch it."""
+    wf = view.get("waitingFor")
+    if view["game"]["phase"] != "end" and (wf is None or not options.has_choices(wf, ctx)):
+        return client.player()
+    return view
 
 
 def cmd_card(args):

@@ -95,4 +95,25 @@ and `tfm plan --opening` ranks a strong synthetic opening above a weak one.
 
 All three are implemented and merged (1 → 2 → 3). `value.future_matches` delegates to `tfm/deck.py`;
 Approach 2's interim pricing was dropped in favour of Approach 1's planned-tableau pricing, and `tfm plan`
-uses the deck rates for its future-card stream. Not yet tried in a live game.
+uses the deck rates for its future-card stream.
+
+### After the first live game (g506b18d8ce00, 3 players)
+
+Fixes for what two agent seats logged:
+- `value.CUSTOM_BEHAVIORS` spells out effects the app implements in custom code (Noctis City's energy and
+  city, Lava Tube Settlement's city, Small Open Pit Mine, Deepmining, Robotic Workforce, Industrial Complex,
+  Preservation Program, Pharmacy Union's starting diseases, Kickstarter, Oumuamua, Astra Mechanica,
+  Self-replicating Robots, Shipment to Earth, Potatoes, Imported Hydrogen). `value.card_behavior` merges
+  them, and both `value` and `plan` use it, so hand cards' tiles count for tile triggers too.
+- Requirements: underground tokens, corruption, production steps; production and stock a card gives up are
+  checked in both `value` (flag) and `plan` (not playable), from generation 1.
+- Repeated actions are played out one use per generation (`value._price_action`): inputs from stock and
+  production (energy does not carry over; your other energy actions go first), resources here only pay
+  through a conversion or VP, each use priced at its own generation's rates, identified tokens dug once.
+- Awards: only funded ones, valued by the change in expected VP at game end (`award_outlook`); the hand
+  count moves only with cards drawn. Rival "reacts to plays" notes print once per `tfm value`.
+- `plan`'s future-card stream: the 4 cards drawn per generation, one per quarter of the deck ranked by
+  `value_card`'s return per M€ at that point of the game (parameter requirements checked). It shrinks near
+  the end. Leftover M€ goes to the best of drawn cards, standard projects and below-break-even hand cards.
+- Bugs found on the way: prelude M€ counted twice (Donation, Loan...), plant production read from the wrong
+  view key in `plan`, M€ production in `value._money`.
