@@ -47,7 +47,8 @@ use `tfm -s <seat> turn --wait 50`.
   projected final scores (from how fast each count has grown and rivals' cards that raise it by
   themselves), your chance of 1st and 2nd, **fund EV** (your expected award VP minus the fee and the VP
   it hands rivals) and **wait** (your value if a rival likely to win funds it instead), with a verdict.
-  It's an estimate: check rivals' hands and played cards before acting on a close call.
+  It's an estimate that assumes `tfm`'s own guess of the generations left: if yours differs, adjust,
+  and check rivals' hands and played cards before acting on a close call.
 - `SINCE YOUR LAST LOOK`: what happened since your previous `turn`.
 - `YOUR DECISION`: the legal choices. Only these ids are accepted.
 
@@ -104,8 +105,7 @@ Use only your own player link. Never fetch another player's link or read their h
 ## Strategy
 
 Read [docs/STRATEGY.md](docs/STRATEGY.md) once at the start of the game: it covers strategic
-direction, rules that commonly trip players up, the expansions, the endgame, and lessons from past
-games. The short version:
+direction, rules that commonly trip players up, the expansions and the endgame. The short version:
 
 - Count remaining generations from how fast **all** players can finish the global parameters
   (temperature +8°C, oxygen 14%, 9 oceans). Engines that pay back after the game ends are worth nothing.

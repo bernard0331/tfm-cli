@@ -41,6 +41,18 @@ class Baseline(unittest.TestCase):
             self.assertAlmostEqual(ctx.heat, ctx.tr / 8)
             self.assertAlmostEqual(ctx.plant, (5 + ctx.tr) / 8)
 
+    def test_game_length_cap_matches_our_tables(self):
+        # With Prelude, our 4-player games ended in generation 8 and 5-player games in generation 7.
+        self.assertEqual(value.Outlook(view(generation=3, temperature=-30, oxygen=0, oceans=0)).by_length, 6)
+        self.assertEqual(value.Outlook(view(generation=3, temperature=-30, oxygen=0, oceans=0, players=5)).by_length, 5)
+
+    def test_heat_is_dead_after_max_temperature_unless_ambient(self):
+        v = view(temperature=8)
+        self.assertEqual(value.Outlook(v, gens_left=3).heat, 0.0)
+        v["thisPlayer"]["tableau"] = [{"name": "Ambient"}]
+        ctx = value.Outlook(v, gens_left=3)
+        self.assertAlmostEqual(ctx.heat, ctx.tr / 8)
+
     def test_last_generation_tr_is_worth_one_vp(self):
         ctx = value.Outlook(view(), gens_left=1)
         self.assertEqual(ctx.phases, 0)
