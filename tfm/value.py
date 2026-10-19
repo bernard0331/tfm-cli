@@ -65,6 +65,9 @@ STANDARD_BEHAVIORS = {
     "Convert Heat": {"global": {"temperature": 1}},
 }
 
+# Fixed-cost standard projects, cheapest first, for the "a standard project does this for less" check.
+SP_COSTS = {"Power Plant:SP": 11, "Asteroid:SP": 14, "Aquifer": 18, "Greenery": 23, "City": 25}
+
 # Cards whose TR depends on your tags are custom code in the app, so their count is spelled out here.
 TR_PER_TAG = {
     "Terraforming Ganymede": {"tag": "jovian"},
@@ -646,6 +649,21 @@ def value_card(name, ctx, cost=None, buying=False, model=None, nested=False):
     v.net = v.value - v.paid
     v.ratio = (v.value / v.paid) if v.paid else None
     return v
+
+
+def flag_cheaper_standard_projects(valuations, ctx):
+    """Flag project cards that a standard project matches in value for less: Energy Saving for +1 energy
+    production (and the milestone it reaches) is a dearer Power Plant. Each standard project is priced once."""
+    sps = None
+    for v in valuations:
+        if v.info.get("type") not in ("automated", "active", "event") or v.value <= 0:
+            continue
+        if sps is None:
+            sps = [value_card(n, ctx, cost=c, nested=True) for n, c in SP_COSTS.items()]
+        sp = next((sp for sp in sps if sp.paid < v.paid and sp.value >= v.value - 0.5), None)
+        if sp:
+            v.flags.append(f"STANDARD PROJECT does as much for less: {sp.name} ≈{sp.value:.0f} for {sp.paid:g} M€ "
+                           f"(this ≈{v.value:.0f} for {v.paid:g} M€)")
 
 
 def _later(ctx, g):
@@ -1244,7 +1262,7 @@ _AWARD_METRICS = {
     "Investor": "tag:earth", "Metropolist": "cities", "Mogul": "prod:nonmc", "Physicist": "tags:science,space",
     "Visionary": "hand", "Miner": "stock:steel,titanium", "Thermalist": "stock:heat", "Industrialist": "stock:steel,energy",
     "Excentric": "card_resources", "Zoologist": "res:Animal", "A. Zoologist": "res:Animal,Microbe",
-    "Excavator": "tokens",
+    "Excavator": "tokens", "A. Engineer": "prodcards",
 }
 
 
@@ -1284,6 +1302,7 @@ def _metric_delta(metric, v, ctx):
         "colonies": v.colonies, "colonies+cities": v.colonies + v.tiles["city"],
         "crime": (v.persistent_tags + v.event_tags).count("crime"),
         "notags": 1 if not info.get("tags") and ctype in ("automated", "active") else 0,
+        "prodcards": 1 if ctype in ("automated", "active") and any(v.prod.values()) else 0,
         "distinct": len({t for t in v.persistent_tags if t not in ("event", "wild", "clone")}
                         - {t for t, n in ctx.tags.items() if n and t not in ("event",)}),
         # Every play empties a hand slot whichever card it is, so only cards drawn move the count.

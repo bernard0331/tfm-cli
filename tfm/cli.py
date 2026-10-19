@@ -99,6 +99,7 @@ def _print_values(view, names=None, gens=None):
         print("No cards to value: name some, e.g. tfm value \"Kelp Farming\".")
         return
     results = [(value.value_card(name, ctx, buying=buying, model=model), where) for name, model, buying, where in rows]
+    value.flag_cheaper_standard_projects([v for v, _ in results], ctx)
     for v, where in sorted(results, key=lambda r: -r[0].net):
         print("\n".join(value.describe(v, where)))
     for line in value.notes(ctx):

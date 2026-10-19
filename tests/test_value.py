@@ -581,5 +581,36 @@ class LiveGameFixes(unittest.TestCase):
         self.assertFalse(any(f.startswith("NOT PLAYABLE") for f in v.flags), v.flags)
 
 
+
+class CheaperStandardProject(unittest.TestCase):
+    """Live game Polar Gravity Link: Energy Saving (15 M€) with one city in play gave +1 energy production to claim
+    Energizer, which the Power Plant standard project (11 M€) would also have done."""
+
+    def energy_saving(self, cities, awards=()):
+        ms = {"name": "Energizer", "scores": [{"color": "red", "score": 5}]}
+        vw = me(view(milestones=[ms], awards=awards), energyProduction=5)
+        for i, p in enumerate(vw["players"]):
+            p["citiesCount"] = cities if i == 0 else 0
+        vw["thisPlayer"] = vw["players"][0]
+        ctx = value.Outlook(vw)
+        v = value.value_card("Energy Saving", ctx, model={"name": "Energy Saving", "calculatedCost": 15})
+        value.flag_cheaper_standard_projects([v], ctx)
+        return v
+
+    def test_one_city_is_a_dearer_power_plant(self):
+        v = self.energy_saving(cities=1)
+        self.assertTrue(any(f.startswith("STANDARD PROJECT does as much for less: Power Plant:SP") for f in v.flags),
+                        v.flags)
+
+    def test_many_cities_beat_the_power_plant(self):
+        v = self.energy_saving(cities=4)
+        self.assertFalse(any(f.startswith("STANDARD PROJECT") for f in v.flags), v.flags)
+
+    def test_a_engineer_counts_production_cards(self):
+        v = self.energy_saving(cities=1, awards=[award("A. Engineer", 8, 8, funded_by="p0")])
+        self.assertTrue(any(label.startswith("A. Engineer award") for label, _ in v.parts), v.parts)
+        self.assertFalse(any(f.startswith("STANDARD PROJECT") for f in v.flags), v.flags)
+
+
 if __name__ == "__main__":
     unittest.main()
