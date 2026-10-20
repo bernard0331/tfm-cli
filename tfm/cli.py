@@ -263,14 +263,15 @@ def cmd_vp(args):
     seat = seats.load(args.seat)
     client = _client(seat)
     view = client.player()
-    trades = None
-    if score.vp_trade_colonies(view["game"]):
+    logs = None
+    if view["game"].get("colonies"):
+        # Colony VP (Titania builds and trades) is only in the log.
         logs = []
         for g in range(1, view["game"]["generation"] + 1):
             logs.extend(client.logs(g) or [])
-        trades = score.count_vp_trades(view["game"], logs)
-    final = view["game"]["phase"] != "end" and value.Outlook(view).gens_left <= 1
-    print("\n".join(score.report(view, trades, final=final)))
+    gens = None if view["game"]["phase"] == "end" else value.Outlook(view).gens_left
+    rate = score.held_card_rate(view) if gens else None
+    print("\n".join(score.report(view, logs, gens, rate)))
 
 
 def cmd_options(args):

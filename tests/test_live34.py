@@ -2,9 +2,9 @@
 'Massive Optics Charge' (3 players, Utopia Planitia). Run: python3 -m unittest discover tests"""
 import unittest
 
-from tfm import plan, value
+from tfm import plan, score, value
 from test_plan import first_gen, game
-from test_value import view
+from test_value import award, view
 
 SATURN_KEEP = ["16 Psyche", "Solar Storm", "Heavy Taxation", "Detective TV Series", "Sub-zero Salt Fish"]
 
@@ -182,6 +182,70 @@ class Compression(unittest.TestCase):
         poor = plan.opening(game(), "Cheung Shing MARS", [], ())
         self.assertGreater(sum(rich.state.stream.values()), sum(poor.state.stream.values()))
         self.assertGreater(rich.vp, poor.vp)
+
+
+def rival_view(**rival):
+    v = view(generation=8, temperature=0, oxygen=10, oceans=7)
+    v["game"].update(milestones=[], spaces=[], gameOptions=dict(v["game"]["gameOptions"], boardName="tharsis"))
+    for p in v["players"]:
+        p.update(megacredits=0, steel=0, titanium=0, plants=0, heat=0, energyProduction=0, heatProduction=0,
+                 plantProduction=0, megacreditProduction=0, steelProduction=0, titaniumProduction=0, cardsInHandNbr=0,
+                 victoryPointsBreakdown={k: 0 for k in ("terraformRating", "milestones", "awards", "greenery", "city",
+                                                         "victoryPoints", "total")})
+    v["players"][1].update(rival)
+    return v
+
+
+class RivalProjection(unittest.TestCase):
+    """7. `tfm vp` projects rivals to the end of the game."""
+
+    def test_colony_vp_comes_from_the_log(self):
+        logs = [{"message": "${0} gained ${1} VP", "data": [{"type": 2, "value": "green"}, {"type": 1, "value": "5"}]},
+                {"message": "${0} gained ${1} VP", "data": [{"type": 2, "value": "green"}, {"type": 1, "value": "2"}]},
+                {"message": "${0} traded with ${1}", "data": [{"type": 2, "value": "green"}]}]
+        self.assertEqual(score.colony_vp_from_logs(logs), {"green": 7})
+        v = rival_view()
+        v["game"]["colonies"] = [{"name": "Titania", "colonies": ["green"], "trackPosition": 1}]
+        parts, _ = score.estimate(v, v["players"][1], score.colony_vp_from_logs(logs))
+        self.assertEqual(parts["victoryPoints"], 7)  # the build (5) and a trade (2), not the build alone
+
+    def test_planetary_track_end_scores_most_tags(self):
+        v = rival_view(tags={"venus": 4})
+        v["game"]["pathfinders"] = {"venus": 17, "earth": 3}
+        self.assertEqual(score.track_points(v["game"], v["players"][1], v["players"]), 2)
+        self.assertEqual(score.track_points(v["game"], v["players"][0], v["players"]), 0)
+
+    def test_rest_of_game_counts_hand_heat_plants_and_resources(self):
+        rival = dict(megacredits=60, cardsInHandNbr=12, plants=9, plantProduction=0, heat=8, terraformRating=40,
+                     tableau=[{"name": "Birds", "resources": 3}])
+        v = rival_view(**rival)
+        more, why = score.rest_of_game(v["players"][1], v["game"], 1, (1.6, 14))
+        # 1 greenery (+1 oxygen TR), 1 heat TR, 4 hand cards (60 M€ / 14) at 1.6 VP, Birds +1 animal.
+        self.assertEqual(more, round(2 + 1 + 4 * 1.6 + 1))
+        self.assertIn("4 of 12 hand cards", why)
+        lines = score.report(v, logs=[], gens_left=1, card_rate=(1.6, 14))
+        self.assertTrue(any("p1: ~" in line and "by game end ~" in line for line in lines), lines)
+
+    def test_two_generations_add_income(self):
+        v = rival_view(megacredits=20, cardsInHandNbr=10, terraformRating=40, megacreditProduction=10)
+        one, _ = score.rest_of_game(v["players"][1], v["game"], 1, (1.6, 14))
+        two, _ = score.rest_of_game(v["players"][1], v["game"], 2, (1.6, 14))
+        self.assertGreater(two, one)
+
+
+class AwardHands(unittest.TestCase):
+    """8. Award projections count rivals' hands and the generations left."""
+
+    def outlook(self, hand, mc):
+        a = award("A. Manufacturer", 8, 7, funded_by="p0")
+        v = view(awards=[a])
+        v["players"][1].update(cardsInHandNbr=hand, megacredits=mc)
+        return value.award_outlook(a, value.Outlook(v, gens_left=1))
+
+    def test_big_rival_hand_lowers_your_chance(self):
+        none, rich, poor = self.outlook(0, 0), self.outlook(19, 80), self.outlook(19, 5)
+        self.assertLess(rich["p1"], none["p1"] - 0.15)
+        self.assertLess(rich["p1"], poor["p1"])  # a hand it cannot pay for counts less
 
 
 class CurrentGeneration(unittest.TestCase):

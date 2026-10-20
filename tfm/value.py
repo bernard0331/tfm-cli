@@ -2188,11 +2188,30 @@ def _auto_growth(metric, player):
     return out
 
 
+_METRIC_TYPES = {"automated": ("automated",), "active": ("active",), "events": ("event",),
+                 "projects_events": PROJECT, "projects": ("automated", "active"), "blue_green": ("automated", "active")}
+
+
+def _deck_share(ctx, tags=None, types=None):
+    """Share of the deck's project cards with one of `tags` (kept: not events) or of one of `types`."""
+    cards = deck.deck(ctx.expansions)
+    if not cards:
+        return 0.0
+    if tags is not None:
+        hits = sum(1 for c in cards if c.get("type") != "event" and set(tags) & set(c.get("tags") or []))
+    else:
+        hits = sum(1 for c in cards if c.get("type") in types)
+    return hits / len(cards)
+
+
 def _hand_bump(metric, player, ctx):
-    """Cards in hand that could still raise a card-count or tag award: yours exactly, rivals' estimated."""
+    """(expected rise, variance) from cards in hand that could still raise a card-count or tag award: yours
+    exactly, rivals' from their hand size. A rival plays the share of its hand it can pay for in the generations
+    left (its M€, steel and titanium plus income, at the deck's mean card cost); each card counts with the
+    deck's share of matching cards, blended with the rival's own tag mix for tag awards (hands follow strategy)."""
     tags = metric[4:].split(",") if metric.startswith("tag:") else metric[5:].split(",") if metric.startswith("tags:") else None
     if tags is None and metric not in _CARD_COUNT_METRICS:
-        return 0.0
+        return 0.0, 0.0
     if player["color"] == ctx.me["color"]:
         hits = 0
         for c in ctx.hand:
@@ -2201,14 +2220,24 @@ def _hand_bump(metric, player, ctx):
                 hits += 0 if info.get("type") == "event" else sum(info.get("tags", []).count(t) for t in tags)
             else:
                 hits += 1 if info.get("type") in ("automated", "active", "event") else 0
-        return 0.6 * hits
+        return 0.6 * hits, 0.24 * hits
     hand = player.get("cardsInHandNbr") or 0
+    if not hand:
+        return 0.0, 0.0
     if tags is None:
-        return 0.25 * hand
-    have = player.get("tags") or {}
-    total = sum(n for t, n in have.items() if t != "event") or 1
-    share = max(0.05, sum(have.get(t, 0) for t in tags) / total)
-    return 0.5 * share * hand
+        share = _deck_share(ctx, types=_METRIC_TYPES.get(metric, PROJECT))
+    else:
+        have = player.get("tags") or {}
+        total = sum(n for t, n in have.items() if t != "event")
+        own = sum(have.get(t, 0) for t in tags) / total if total else 0.0
+        share = (own + _deck_share(ctx, tags=tags)) / 2
+    phases = max(0, ctx.gens_left - 1)
+    money = (player.get("megacredits", 0) or 0) + 2 * (player.get("steel", 0) or 0) + \
+        3 * (player.get("titanium", 0) or 0) + phases * ((player.get("terraformRating", 20) or 0) +
+                                                         (player.get("megacreditProduction", 0) or 0))
+    played = min(1.0, money / (hand * max(1.0, deck.mean_cost(ctx.expansions))))
+    n = hand * played
+    return n * share, n * share * (1 - share)
 
 
 def award_outlook(award, ctx, history=None, seed=0):
@@ -2229,8 +2258,10 @@ def award_outlook(award, ctx, history=None, seed=0):
         p = players.get(color, {})
         rate = _award_rate(award["name"], metric, color, score, ctx, history) + _auto_growth(metric, p)
         # Stock and hands get spent along the way, so only half their past growth is assumed to stick.
-        mean = score + rate * ctx.gens_left * (0.5 if kind == "wide" else 1) + _hand_bump(metric, p, ctx)
-        sigma = _SPREAD[kind] * math.sqrt(ctx.gens_left) * (1 + rate) + (0.4 * score if kind == "wide" else 0)
+        bump, var = _hand_bump(metric, p, ctx)
+        mean = score + rate * ctx.gens_left * (0.5 if kind == "wide" else 1) + bump
+        sigma = math.hypot(_SPREAD[kind] * math.sqrt(ctx.gens_left) * (1 + rate) + (0.4 * score if kind == "wide" else 0),
+                           math.sqrt(var))
         proj[color] = (mean, sigma)
     if max(m for m, _ in proj.values()) < 1:
         return None  # nobody has started on it: nothing to project yet
