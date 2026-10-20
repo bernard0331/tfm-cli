@@ -50,6 +50,8 @@ class Context:
         game = view["game"]
         self.board_name = game["gameOptions"]["boardName"]
         self.spaces = {s["id"]: s for s in game["spaces"]}
+        self.players = view["players"]
+        self.game = game
 
     def show_text(self, key):
         """True when this card/milestone text has not been shown to this seat yet."""
@@ -119,7 +121,7 @@ def _expand(node, ctx, ids, path, prefix, out, top=False):
         for j, card in enumerate(node["cards"]):
             if card.get("isDisabled"):
                 continue
-            text = card_line(card, with_text=ctx.show_text(card["name"]))
+            text = card_line(card, with_text=ctx.show_text(card["name"])) + _play_condition(card["name"], ctx)
             add(_join(label_prefix, text), card["name"], ids + [j + 1])
         return
     if t == "space" and len(node["spaces"]) <= EXPAND_LIMIT:
@@ -192,13 +194,24 @@ def _and_combos(node, ctx):
     return [(" + ".join(labels), resps) for labels, resps in combos]
 
 
+def _play_condition(name, ctx):
+    """' ⚠ ...' when a card's custom play condition (not in its requirement list) fails now, e.g. Shipment to
+    Earth's 3 plants and 3 steel; shown in draft and buy lists too."""
+    from . import value
+    try:
+        check = value.custom_requirement(name, ctx)
+    except (KeyError, TypeError, AttributeError):
+        return ""
+    return f"  ⚠ now: {check[1]}" if check and not check[0] else ""
+
+
 def needs(node, ctx):
     """Describe the values `tfm play ID ...` expects for an input."""
     t = node["type"]
     if t == "card":
         names = []
         for c in node["cards"]:
-            names.append(card_line(c, with_text=ctx.show_text(c["name"])))
+            names.append(card_line(c, with_text=ctx.show_text(c["name"])) + _play_condition(c["name"], ctx))
         lo, hi = node.get("min", 0), node.get("max", len(node["cards"]))
         return f"VALUE = comma-separated card names, pick {lo}-{hi}; cards:\n      - " + "\n      - ".join(names)
     if t == "amount":

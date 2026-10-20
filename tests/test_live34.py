@@ -2,7 +2,9 @@
 'Massive Optics Charge' (3 players, Utopia Planitia). Run: python3 -m unittest discover tests"""
 import unittest
 
-from tfm import plan, score, value
+import types
+
+from tfm import data, options, plan, score, value
 from test_plan import first_gen, game
 from test_value import award, view
 
@@ -246,6 +248,136 @@ class AwardHands(unittest.TestCase):
         none, rich, poor = self.outlook(0, 0), self.outlook(19, 80), self.outlook(19, 5)
         self.assertLess(rich["p1"], none["p1"] - 0.15)
         self.assertLess(rich["p1"], poor["p1"])  # a hand it cannot pay for counts less
+
+
+def labels(v):
+    return [label for label, _ in v.parts]
+
+
+class CheaperStandardProject(unittest.TestCase):
+    """9. A standard project is only compared with a card whose main effect is the same kind."""
+
+    def test_energizer_power_plant_is_not_compared_with_cards_without_energy(self):
+        ms = {"name": "Energizer", "scores": [{"color": "red", "score": 5}]}
+        v = view(milestones=[ms])
+        v["thisPlayer"]["energyProduction"] = 5
+        ctx = value.Outlook(v)
+        for name in ("Weather Balloons", "Carbon Nanosystems", "Atmoscoop"):
+            with self.subTest(card=name):
+                val = value.value_card(name, ctx)
+                value.flag_cheaper_standard_projects([val], ctx)
+                self.assertFalse(any(f.startswith("STANDARD PROJECT") for f in val.flags), val.flags)
+        self.assertEqual(value.main_effect(value.value_card("Atmoscoop", ctx), ctx), "temperature")
+
+
+class Atmoscoop(unittest.TestCase):
+    """10. Atmoscoop's 2 temperature or 2 Venus steps are priced."""
+
+    def test_two_steps(self):
+        ctx = value.Outlook(view(temperature=-20))
+        v = value.value_card("Atmoscoop", ctx)
+        self.assertGreaterEqual(v.tr, 2)
+        self.assertGreater(v.value, 2 * ctx.tr)
+
+
+class ActionsWaitForRequirements(unittest.TestCase):
+    """11. A card not playable yet acts only from the generation its requirement is likely met."""
+
+    def test_livestock_at_two_percent_oxygen(self):
+        ctx = value.Outlook(view(oxygen=2), gens_left=6)
+        v = value.value_card("Livestock", ctx)
+        uses = next(int(label.split("×")[1].split()[0]) for label in labels(v) if label.startswith("action ×"))
+        self.assertLess(uses, 6)
+        ready = value.value_card("Livestock", value.Outlook(view(oxygen=9), gens_left=6))
+        self.assertTrue(any(label.startswith("action ×6") for label in labels(ready)), labels(ready))
+
+
+class PlayConditions(unittest.TestCase):
+    """12. Custom play conditions are flagged, in value and in draft/buy lists."""
+
+    def option_ctx(self, v):
+        return options.Context(v)
+
+    def test_shipment_to_earth_needs_3_steel(self):
+        v = view()
+        v["thisPlayer"].update(plants=5, steel=1)
+        flags = value.value_card("Shipment to Earth", value.Outlook(v), buying=True).flags
+        self.assertIn("NOT PLAYABLE YET: needs 3 plants and 3 steel to lose (short: 3 steel)", flags)
+        v["game"]["gameOptions"]["boardName"] = "tharsis"
+        node = {"type": "card", "title": "Select a card to keep", "min": 1, "max": 1,
+                "cards": [{"name": "Shipment to Earth"}, {"name": "Mine"}]}
+        listed = [lf.label for lf in options.leaves(node, self.option_ctx(v))]
+        self.assertIn("⚠ now: needs 3 plants and 3 steel", listed[0])
+        self.assertNotIn("⚠", listed[1])
+
+    def test_class_action_lawsuit_needs_one_leader_in_corruption(self):
+        v = view()
+        flags = value.value_card("Class-action Lawsuit", value.Outlook(v)).flags
+        self.assertTrue(any(f.startswith("NOT PLAYABLE YET: needs one player with strictly the most corruption")
+                            for f in flags), flags)
+        v["players"][2]["underworldData"] = {"corruption": 3}
+        self.assertIn("targets p2 (3 corruption)", value.value_card("Class-action Lawsuit", value.Outlook(v)).flags)
+
+
+class Undervalued(unittest.TestCase):
+    """13. Cards whose custom effects were missing."""
+
+    def test_comet_aiming_places_an_ocean_every_other_generation(self):
+        v = view()
+        v["thisPlayer"]["titaniumProduction"] = 2
+        val = value.value_card("Comet Aiming", value.Outlook(v, gens_left=5))
+        self.assertTrue(any(label.startswith("action ×4") for label in labels(val)), labels(val))
+        self.assertEqual(val.raises["oceans"], 2)  # fuel, ocean, fuel, ocean
+        self.assertGreater(val.value, 0)
+
+    def test_museum_of_early_colonisation_production(self):
+        val = value.value_card("Museum of Early Colonisation", value.Outlook(view()))
+        self.assertEqual({r: val.prod.get(r) for r in ("energy", "steel", "titanium", "plants")},
+                         {"energy": -1, "steel": 1, "titanium": 1, "plants": 1})
+
+    def test_excavator_leasing_counts_everyones_excavations(self):
+        v = view(generation=5)
+        v["game"]["gameOptions"]["expansions"]["underworld"] = True
+        v["game"]["spaces"] = [{"id": str(i), "excavator": "green"} for i in range(8)]  # 2 per finished generation
+        val = value.value_card("Excavator Leasing", value.Outlook(v, gens_left=4))
+        self.assertTrue(any(label.startswith("1 M€ per excavation by anyone ×8.0") for label in labels(val)), labels(val))
+
+    def test_helion_heat_is_worth_one_megacredit(self):
+        v = view(temperature=6)
+        ctx = value.Outlook(v, gens_left=3)
+        self.assertLess(ctx.heat, 1)
+        helion = value.value_card("Helion", ctx)
+        self.assertIn(("+3 heat prod × 2", 6.0), helion.parts)
+        v["thisPlayer"]["tableau"] = [{"name": "Helion"}]
+        self.assertEqual(value.Outlook(v, gens_left=3).heat, 1.0)
+
+    def test_card_text_without_renderer_glyphs(self):
+        self.assertTrue(data.card_text("Ceres Tech Market").startswith("Action: Discard any number of cards"))
+        self.assertEqual(data.card_text("Vital Colony"), "Place a colony. Receive the placement bonus twice.")
+
+    def test_ceres_tech_market_action_is_priced(self):
+        val = value.value_card("Ceres Tech Market", value.Outlook(view()))
+        self.assertTrue(any(label.startswith("action ×") for label in labels(val)), labels(val))
+        self.assertFalse(val.manual, val.manual)
+
+
+class Overvalued(unittest.TestCase):
+    """14. Trade fleets from the colonies in play; Boom Town's own titanium at 2 M€."""
+
+    def test_trade_fleet_from_the_colonies_left(self):
+        poor = colonies(view(), ("Titania", [], 5), ("Triton", [], 1))
+        rich = colonies(view(), ("Luna", [], 4), ("Ceres", [], 4))
+        for v in (poor, rich):
+            v["thisPlayer"]["fleetSize"] = 1
+        cheap = value.value_card("Space Port Colony", value.Outlook(poor))
+        good = value.value_card("Sky Docks", value.Outlook(rich))
+        fleet = lambda val: sum(a for label, a in val.parts if "trade fleet" in label)
+        self.assertEqual(fleet(cheap), 0)  # Titania at 0 VP and 1 titanium don't cover the 9 M€ trade
+        self.assertGreater(fleet(good), 0)
+
+    def test_boom_town_titanium_at_two(self):
+        val = value.value_card("Boom Town", value.Outlook(view(), gens_left=4))
+        self.assertIn(("+2 titanium prod × 3", 2 * 2 * 3), val.parts)
 
 
 class CurrentGeneration(unittest.TestCase):
