@@ -1,0 +1,199 @@
+"""Checks for the problems agent seats found in live games 'Isolated Signal Stream' (4 players, Terra Cimmeria) and
+'Massive Optics Charge' (3 players, Utopia Planitia). Run: python3 -m unittest discover tests"""
+import unittest
+
+from tfm import plan, value
+from test_plan import first_gen, game
+from test_value import view
+
+SATURN_KEEP = ["16 Psyche", "Solar Storm", "Heavy Taxation", "Detective TV Series", "Sub-zero Salt Fish"]
+
+
+def opening_view(corps=(), preludes=(), projects=()):
+    v = game()
+    v["dealtCorporationCards"] = [{"name": n} for n in corps]
+    v["dealtPreludeCards"] = [{"name": n} for n in preludes]
+    v["dealtProjectCards"] = [{"name": n} for n in projects]
+    return v
+
+
+def colonies(v, *tiles):
+    """Colony tiles in play: (name, owners, track position)."""
+    v["game"]["colonies"] = [{"name": n, "colonies": list(owners), "trackPosition": pos, "isActive": True}
+                             for n, owners, pos in tiles]
+    return v
+
+
+class PackageTags(unittest.TestCase):
+    """1. Requirements count the whole opening package's tags."""
+
+    def test_value_points_at_the_package_instead_of_not_playable(self):
+        v = opening_view(["Saturn Systems"], ["UNMI Contractor", "Donation"], ["Heavy Taxation", "Detective TV Series"])
+        flags = value.value_card("Heavy Taxation", value.Outlook(v)).flags
+        self.assertFalse(any(f.startswith("NOT PLAYABLE") for f in flags), flags)
+        self.assertTrue(any("met if your package includes 2 of UNMI Contractor, Detective TV Series" in f
+                            for f in flags), flags)
+
+    def test_plan_plays_the_tag_card_that_unlocks_another(self):
+        # Detective TV Series is worth ~0 by itself, but with UNMI Contractor's Earth tag it unlocks Heavy Taxation.
+        p = plan.opening(game(), "Saturn Systems", ["UNMI Contractor", "Donation"], SATURN_KEEP)
+        self.assertIsNotNone(first_gen(p, "Heavy Taxation"))
+        self.assertLessEqual(first_gen(p, "Detective TV Series"), first_gen(p, "Heavy Taxation"))
+        p = plan.opening(game(), "Saturn Systems", ["Donation"], ["Heavy Taxation", "Detective TV Series"])
+        self.assertIsNone(first_gen(p, "Heavy Taxation"))
+
+
+class EveryRequirement(unittest.TestCase):
+    """2. The simulator respects every requirement it can check and blocks the ones it can't."""
+
+    def test_unreachable_requirements_are_never_played(self):
+        # Diversity Support needs 9 resource types; Private Investigator a player with more corruption than you.
+        p = plan.opening(game(), "Cheung Shing MARS", [], ["Diversity Support", "Private Investigator"])
+        self.assertIsNone(first_gen(p, "Diversity Support"))
+        self.assertIsNone(first_gen(p, "Private Investigator"))
+
+    def test_resource_types_and_any_player_requirements(self):
+        v = view()
+        v["thisPlayer"].update(megacredits=5, steel=1, plants=2)
+        ctx = value.Outlook(v)
+        self.assertEqual(value.requirement_status("resourceTypes 9", ctx), (False, "resource types 3/9"))
+        v["players"][1]["citiesCount"] = 3
+        met, text = value.requirement_status("cities 4 (any player)", value.Outlook(v))
+        self.assertTrue(met, text)  # 1 + 3 + 1 + 1 cities in play
+
+    def test_unchecked_rival_requirements_wait_for_mid_game(self):
+        planner = plan._Planner(game(), 8)
+        s = planner.state_from_view()
+        self.assertFalse(planner.playable("Martian Culture", s, planner.ctx(s, 0)))  # 2 Mars tags (any player)
+        self.assertTrue(planner.playable("Martian Culture", s, planner.ctx(s, 5)))
+
+    def test_volcanic_tile_needs_a_free_volcanic_space(self):
+        v = view()
+        v["game"]["spaces"] = [{"id": "08", "spaceType": "land", "highlight": "volcanic", "tileType": 2, "color": "blue"},
+                               {"id": "09", "spaceType": "land"}]
+        flags = value.value_card("Lava Flows:ares", value.Outlook(v)).flags
+        self.assertIn("NOT PLAYABLE: volcanic spaces free: none", flags)
+        # A board without volcanic spaces (Utopia Planitia) lets the tile go on any land space.
+        v["game"]["spaces"] = [{"id": "09", "spaceType": "land"}]
+        ok = value.tile_space_status("Lava Flows:ares", value.Outlook(v))
+        self.assertEqual(ok, (True, "this board has no volcanic spaces: the tile may go on any land space"))
+
+
+class CustomCode(unittest.TestCase):
+    """3. Custom-code preludes and corporation effects are priced."""
+
+    def test_vital_colony_takes_the_build_bonus_twice(self):
+        v = colonies(view(), ("Titania", [], 1), ("Ceres", [], 1))
+        v["preludeCardsInHand"] = [{"name": "Vital Colony"}]
+        val = value.value_card("Vital Colony", value.Outlook(v))
+        self.assertTrue(any("Titania: Gain 5, 3, or 2 VP ×2" in label for label, _ in val.parts), val.parts)
+        self.assertGreaterEqual(val.value, 2 * 5 * value.VP - 10)
+
+    def test_double_down_copies_the_other_prelude(self):
+        v = view()
+        v["preludeCardsInHand"] = [{"name": "Business Empire"}, {"name": "Double Down"}]
+        ctx = value.Outlook(v)
+        dd, be = value.value_card("Double Down", ctx), value.value_card("Business Empire", ctx)
+        self.assertAlmostEqual(dd.value, be.value)
+        self.assertGreater(dd.value, 0)
+        p = plan.opening(game(), "Cheung Shing MARS", ["Business Empire", "Double Down"], (), gens=1)
+        self.assertEqual(p.state.prod["megacredits"], 3 + 6 + 6)
+
+    def test_aridor_gains_production_for_new_tag_types(self):
+        p = plan.opening(game(), "Aridor", ["Business Empire", "Donation"], (), gens=1)
+        self.assertEqual(p.state.prod["megacredits"], 6 + 1)  # Business Empire's Earth tag is a new type
+        ctx = value.Outlook(view(generation=1, temperature=-30, oxygen=0, oceans=0))
+        self.assertTrue(any(label.startswith("new tag types") and amt > 0
+                            for label, amt in value.value_card("Aridor", ctx).combo))
+        v = view(tags={"earth": 1})
+        v["thisPlayer"]["tableau"] = [{"name": "Aridor"}]
+        parts = value.value_card("Mine", value.Outlook(v)).parts
+        self.assertTrue(any(label.startswith("your Aridor") for label, _ in parts), parts)
+
+    def test_saturn_systems_counts_its_own_and_rivals_jovian_tags(self):
+        ctx = value.Outlook(view(generation=1, temperature=-30, oxygen=0, oceans=0))
+        combo = dict(value.value_card("Saturn Systems", ctx).combo)
+        self.assertTrue(any(k.startswith("effect ×") and k.endswith("own)") for k in combo), combo)
+        self.assertTrue(any(k.startswith("rivals' jovian tags") and a > 0 for k, a in combo.items()), combo)
+
+
+class PreludeCash(unittest.TestCase):
+    """4. Prelude M€ is spent in generation 1."""
+
+    def test_donation_pays_for_16_psyche_in_generation_1(self):
+        with_cash = plan.opening(game(), "Saturn Systems", ["UNMI Contractor", "Donation"], SATURN_KEEP)
+        self.assertEqual(first_gen(with_cash, "16 Psyche"), 1)
+        without = plan.opening(game(), "Saturn Systems", ["UNMI Contractor", "Mohole"], SATURN_KEEP)
+        self.assertNotEqual(first_gen(without, "16 Psyche"), 1)
+
+
+class KeptCards(unittest.TestCase):
+    """5. Cards whose requirement is reached later are scheduled; cards worth less than they cost are not kept."""
+
+    def test_later_requirement_is_scheduled(self):
+        p = plan.opening(game(), "Cheung Shing MARS", [], ["Kelp Farming"])
+        played = first_gen(p, "Kelp Farming")
+        self.assertIsNotNone(played)
+        oceans = {gen: plan._whole("oceans", par["oceans"]) for gen, par in p.state.trace}
+        self.assertGreaterEqual(oceans[played], 6)
+
+    def test_card_played_only_with_leftover_money_is_not_kept(self):
+        # Neutralizer Factory needs Venus 10%: reached late, worth less than 7 + 3 M€ then.
+        v = opening_view(["Cheung Shing MARS"], ["Donation", "Business Empire"], ["Neutralizer Factory", "Mine"])
+        _, _, _, keep = plan.best_openings(v, top=1)[0]
+        self.assertIn("Mine", keep)
+        self.assertNotIn("Neutralizer Factory", keep)
+
+    def test_value_prices_a_card_when_its_requirement_is_met(self):
+        # Kelp Farming at 0 oceans pays production only from the generation 6 oceans are likely placed.
+        ctx = value.Outlook(view(generation=1, temperature=-30, oxygen=0, oceans=0, venus=0))
+        v = value.value_card("Kelp Farming", ctx)
+        self.assertTrue(any(f.startswith("valued as played in generation") for f in v.flags), v.flags)
+        self.assertTrue(any(f.startswith("NOT PLAYABLE YET: oceans 0") for f in v.flags), v.flags)
+        self.assertLess(v.value, value.value_card("Kelp Farming", value.Outlook(view(oceans=6))).value)
+
+
+class Compression(unittest.TestCase):
+    """6. Projections separate openings: the economy compounds and the table finishes terraforming on schedule."""
+
+    def test_table_finishes_terraforming_by_the_projected_end(self):
+        p = plan.opening(game(), "Cheung Shing MARS", [], [])
+        planner = plan._Planner(game())
+        steps_left = sum((plan.MAX[k] - plan._whole(k, x)) / plan.STEP[k]
+                         for k, x in p.state.trace[-1][1].items() if k != "venus")
+        self.assertLessEqual(steps_left, planner.table_pace + 1)
+
+    def test_drawn_cards_production_feeds_the_economy(self):
+        p = plan.project(game(mc=40, generation=1), gens=6)
+        self.assertGreater(p.state.prod["megacredits"], 0)
+
+    def test_draft_picks_beat_random_cards(self):
+        n = 100
+        plain = plan._pick_weights(n, draft=False)
+        drafted = plan._pick_weights(n, draft=True)
+        for weights in plain + drafted:
+            self.assertAlmostEqual(sum(weights), 1.0)
+        rank = lambda w: sum(j * x for j, x in enumerate(w))  # expected position in the deck, 0 = best
+        self.assertLess(rank(plain[0]), rank(plain[3]))
+        self.assertLess(rank(drafted[1]), rank(plain[1]))
+
+    def test_income_buys_more_drawn_cards(self):
+        rich = plan.opening(game(), "Cheung Shing MARS", ["Business Empire"], ())
+        poor = plan.opening(game(), "Cheung Shing MARS", [], ())
+        self.assertGreater(sum(rich.state.stream.values()), sum(poor.state.stream.values()))
+        self.assertGreater(rich.vp, poor.vp)
+
+
+class CurrentGeneration(unittest.TestCase):
+    """21. The plan spends this generation's M€ (the app's player model calls it `megacredits`)."""
+
+    def test_current_generation_is_spent(self):
+        v = game(["Mine"], mc=39, generation=7, temperature=-10, oxygen=8, oceans=6, heat=11)
+        self.assertEqual(plan._Planner(v, 2).state_from_view().stock["megacredits"], 39)
+        p = plan.project(v, gens=2)
+        self.assertEqual(first_gen(p, "Mine"), 7)
+        self.assertIn((7, "temperature (heat)"), p.plays)
+
+
+if __name__ == "__main__":
+    unittest.main()

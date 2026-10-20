@@ -424,7 +424,7 @@ class _Planner:
         info = data.card(name) or {}
         for req in info.get("req", []):
             met, _ = value.requirement_status(req, ctx)
-            if met is None and _rival_req(req):
+            if not met and _rival_req(req) and not req.startswith("max "):
                 # Rivals' tiles, tags and Turmoil are not simulated: assume they meet it by mid-game.
                 met = ctx.gens_left <= self.gens - self.gens // 2
             if not met:
