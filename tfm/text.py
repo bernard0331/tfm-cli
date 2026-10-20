@@ -61,7 +61,7 @@ def card_line(model_or_name, with_text=True, cost=None):
         bits.append(f"{resources} {info.get('resource', 'res')}")
     line = name + (f" ({'; '.join(bits)})" if bits else "")
     if with_text and info.get("text"):
-        line += f" — {info['text']}"
+        line += f" — {data.card_text(name)}"
     return line
 
 

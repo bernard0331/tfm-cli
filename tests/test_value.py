@@ -546,7 +546,7 @@ class LiveGameFixes(unittest.TestCase):
 
     # --- combos and custom code
     def test_hand_city_counts_for_tile_triggers(self):
-        vw = me(view(hand=[{"name": "Lava Tube Settlement", "calculatedCost": 15}]), megaCredits=40)
+        vw = me(view(hand=[{"name": "Lava Tube Settlement", "calculatedCost": 15}]), megacredits=40)
         v = value.value_card("Rover Construction", value.Outlook(vw))
         label, amount = v.combo[0]
         self.assertTrue(label.startswith("effect ×") and amount > 0, v.combo)

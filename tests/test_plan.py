@@ -12,7 +12,7 @@ from test_value import view
 def game(hand=(), mc=0, generation=1, temperature=-30, oxygen=0, oceans=0, venus=0, **me):
     v = view(generation=generation, temperature=temperature, oxygen=oxygen, oceans=oceans, venus=venus,
              hand=[{"name": n} for n in hand])
-    v["thisPlayer"].update(megaCredits=mc, terraformRating=20, citiesCount=0, **me)
+    v["thisPlayer"].update(megacredits=mc, terraformRating=20, citiesCount=0, **me)
     return v
 
 
@@ -180,7 +180,8 @@ class LiveGameFixes(unittest.TestCase):
         # Industrial Complex raises every production below 1 to 1, energy included.
         p = plan.opening(game(), "Cheung Shing MARS", ["Industrial Complex"], ["Noctis City"])
         self.assertEqual(first_gen(p, "Noctis City"), 1)
-        self.assertEqual(p.state.prod["energy"], 0)  # Noctis City gave up the energy Industrial Complex added
+        # Noctis City gave up the energy Industrial Complex added (drawn cards add fractions of production later).
+        self.assertLess(p.state.prod["energy"], 1)
         self.assertTrue(all(p.state.prod[r] >= 1 for r in ("steel", "titanium", "plants", "heat")), p.state.prod)
 
     def test_opening_respects_underground_token_requirement(self):

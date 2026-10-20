@@ -160,10 +160,10 @@ def final_gen_upside(player, game):
     heat_vp = min(int(player.get("heat", 0)) // 8, left["temperature"])
     rates = [cost / (vp if left.get(param) else vp_closed) for _, cost, param, vp, vp_closed in SP_POINTS
              if (vp if left.get(param) else vp_closed)]
-    mc_vp = int(player.get("megaCredits", 0) / min(rates)) if rates else 0
+    mc_vp = int(player.get("megacredits", 0) / min(rates)) if rates else 0
     total = green_vp + heat_vp + mc_vp
     bits = [f"{greeneries} greenery" if greeneries else "", f"{heat_vp} heat TR" if heat_vp else "",
-            f"{mc_vp} from {player.get('megaCredits', 0)} M€" if mc_vp else ""]
+            f"{mc_vp} from {player.get('megacredits', 0)} M€" if mc_vp else ""]
     return total, ", ".join(b for b in bits if b)
 
 

@@ -55,7 +55,7 @@ class Cards(unittest.TestCase):
 class FinalGeneration(unittest.TestCase):
     def test_upside_from_plants_heat_and_megacredits(self):
         game = {"temperature": 0, "oxygenLevel": 13, "oceans": 9}
-        player = {"plants": 7, "plantProduction": 2, "heat": 16, "megaCredits": 30}
+        player = {"plants": 7, "plantProduction": 2, "heat": 16, "megacredits": 30}
         # 1 greenery (+1 oxygen TR), 2 temperature steps, and 30 M€ = 2 asteroids at 14 M€ per TR.
         self.assertEqual(score.final_gen_upside(player, game)[0], 2 + 2 + 2)
         game = {"temperature": 8, "oxygenLevel": 14, "oceans": 9}

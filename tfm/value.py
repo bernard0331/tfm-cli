@@ -36,7 +36,7 @@ PLANETARY = ("venus", "earth", "mars", "jovian", "moon")
 RESOURCES = ("megacredits", "steel", "titanium", "plants", "energy", "heat")
 _PROD_KEY = {"megacredits": "megacreditProduction", "steel": "steelProduction", "titanium": "titaniumProduction",
              "plants": "plantProduction", "energy": "energyProduction", "heat": "heatProduction"}
-_STOCK_KEY = {r: ("megaCredits" if r == "megacredits" else r) for r in RESOURCES}
+_STOCK_KEY = {r: r for r in RESOURCES}  # the app's PlayerModel: megacredits, steel, ...
 
 # Underworld token bag (normal game, from the app's UnderworldExpansion.TOKEN_COUNTS).
 TOKEN_COUNTS = {
@@ -157,7 +157,41 @@ CUSTOM_BEHAVIORS = {
     "Astra Mechanica": lambda ctx: {"behavior": {"drawCard": min(2, (ctx.tags.get("event", 0) if ctx else 0))}},
     # Each action puts 2 resources on a held card or doubles them: about 2 M€ off a later card per use.
     "Self-replicating Robots": {"action": {"stock": {"megacredits": 2}}},
+    "Vital Colony": {"behavior": {"colonies": {"buildColony": {"doubleBonus": True}}}},
+    "Double Down": lambda ctx: _double_down(ctx),
+    "Atmoscoop": {"behavior": {"or": {"behaviors": [{"global": {"temperature": 2}, "title": "temperature +2"},
+                                                     {"global": {"venus": 2}, "title": "Venus +2"}]}}},
+    "Museum of Early Colonisation": {"behavior": {"production": {"energy": -1, "steel": 1, "titanium": 1, "plants": 1}}},
+    # Discarding a card you will not play pays 2 M€ (Sell Patents pays 1): spread over the generations left.
+    "Aridor": {},  # its effect is priced in _plan (_aridor) and _own_triggers
+    "Ceres Tech Market": lambda ctx: {"action": {"stock": {"megacredits": round(2 * _unplayed_per_gen(ctx), 2)}}},
 }
+
+
+def _unplayed_per_gen(ctx):
+    """Hand cards per generation left that are unlikely to be played (expected count, at least 1 per game)."""
+    if ctx is None:
+        return 0.0
+    unplayed = sum(1 - pc["p"] for pc in planned_tableau(ctx))
+    return max(1.0, unplayed) / max(1, ctx.gens_left)
+
+
+def _double_down(ctx):
+    """Double Down copies your other prelude's direct effect (its play effect and M€, not ongoing effects)."""
+    best, best_value = {}, None
+    for other in (ctx.preludes if ctx else []):
+        name = data.card_name(other) or other
+        if name == "Double Down" or (data.card(name) or {}).get("type") != "prelude":
+            continue
+        beh = dict(card_behavior(name, ctx).get("behavior") or {})
+        mc = (data.card(name) or {}).get("startingMC") or 0
+        if mc and "megacredits" not in (beh.get("stock") or {}):
+            beh["stock"] = dict(beh.get("stock") or {}, megacredits=mc)
+        trial = Valuation(name)
+        _apply(beh, trial, ctx, [], name)
+        if best_value is None or trial.value > best_value:
+            best, best_value = dict(beh, copied=name), trial.value
+    return {"behavior": best}
 
 
 def starting_mc(name, beh=None):
@@ -202,6 +236,29 @@ ANY_PLAYER_TRIGGERS = {
 
 
 # --------------------------------------------------------------------------------------------- outlook
+
+def offered_cards(view):
+    """Corporations, preludes and project cards on offer in the opening decision."""
+    found = {}
+
+    def walk(node):
+        if isinstance(node, dict):
+            for c in node.get("cards") or []:
+                if isinstance(c, dict) and c.get("name"):
+                    found.setdefault(c["name"], None)
+            for key in ("options", "andOptions"):
+                for child in node.get(key) or []:
+                    walk(child)
+    walk(view.get("waitingFor"))
+    for key in ("dealtCorporationCards", "dealtPreludeCards", "dealtProjectCards"):
+        for c in view.get(key) or []:
+            found.setdefault(c["name"], None)
+    out = {"corporation": [], "prelude": [], "project": []}
+    for name in found:
+        t = (data.card(name) or {}).get("type")
+        out["corporation" if t == "corporation" else "prelude" if t == "prelude" else "project"].append(name)
+    return out
+
 
 class Outlook:
     """What the current game state says about time left and what resources are worth."""
@@ -255,6 +312,16 @@ class Outlook:
         self.tags = dict(self.me.get("tags") or {})
         self.hand = view.get("cardsInHand") or []
         self.tableau = {c["name"]: c for c in self.me.get("tableau", [])}
+        # Helion spends heat as M€, so heat is worth at least 1 M€ to it.
+        self.helion = "Helion" in self.tableau
+        if self.helion:
+            self.heat = max(self.heat, 1.0)
+        # The opening decision: the offered corporations, preludes and project cards form the package.
+        self.offered = offered_cards(view) if not self.tableau and view.get("dealtCorporationCards") else None
+        self.preludes = list(view.get("_package_preludes") or
+                             [c["name"] for c in view.get("preludeCardsInHand") or []] or
+                             (self.offered or {}).get("prelude", []))
+        self.my_greeneries = view["_greeneries"] if "_greeneries" in view else self.greeneries(self.me["color"])
 
     def greeneries(self, color=None):
         return sum(1 for s in self.game.get("spaces", []) if s.get("tileType") is not None
@@ -420,6 +487,8 @@ def _apply(beh, v, ctx, card_tags, card_name, scale=1.0, label=""):
             v.tokens += best.tokens * scale
             v.draws += best.draws * scale
             v.card_resources += best.card_resources * scale
+    if beh.get("copied"):
+        v.flags.append(f"copies {beh['copied']}'s effect")
     if beh.get("skipFirstTR"):
         # The first TR of each action phase is lost, this generation's included: a TR lost g generations from
         # now is worth 1 VP plus the income phases after it.
@@ -516,10 +585,14 @@ def _apply(beh, v, ctx, card_tags, card_name, scale=1.0, label=""):
     if "colonies" in beh:
         col = beh["colonies"]
         if "buildColony" in col:
+            opts = col["buildColony"] if isinstance(col["buildColony"], dict) else {}
+            worth, where = best_colony_build(ctx, duplicates=bool(opts.get("allowDuplicates")),
+                                             double=bool(opts.get("doubleBonus")))
             v.colonies += scale
-            v.add(f"{pre}colony (placement bonus + owner bonuses)", COLONY * scale)
+            v.add(f"{pre}colony" + (f" ({where})" if where else " (placement bonus + owner bonuses)"), worth * scale)
         if col.get("addTradeFleet"):
-            v.add(f"{pre}+{col['addTradeFleet']} trade fleet", 6.0 * col["addTradeFleet"] * ctx.gens_left * scale)
+            worth, why = fleet_value(ctx, col["addTradeFleet"])
+            v.add(f"{pre}+{col['addTradeFleet']} trade fleet ({why})", worth * scale)
     if "underworld" in beh:
         uw = beh["underworld"]
         if "excavate" in uw:
@@ -551,9 +624,11 @@ def _apply(beh, v, ctx, card_tags, card_name, scale=1.0, label=""):
             n = _resolve(uw["corruption"], card_tags, ctx)
             v.add(f"{pre}{n:g} corruption", n * corruption_value(ctx) * scale)
     if beh.get("titaniumValue"):
-        v.manual.append("raises your titanium value: count your remaining space cards")
+        v.manual.append(("raises" if beh["titaniumValue"] > 0 else "lowers") +
+                        " your titanium value: count your remaining space cards")
     if beh.get("steelValue"):
-        v.manual.append("raises your steel value: count your remaining building cards")
+        v.manual.append(("raises" if beh["steelValue"] > 0 else "lowers") +
+                        " your steel value: count your remaining building cards")
     if beh.get("greeneryDiscount"):
         v.add(f"{pre}greeneries cost 1 plant less", ctx.plant * ctx.plant_phases * 0.5)
 
@@ -561,10 +636,42 @@ def _apply(beh, v, ctx, card_tags, card_name, scale=1.0, label=""):
 def value_card(name, ctx, cost=None, buying=False, model=None, nested=False):
     """Value a card for this player in this game. Returns a Valuation.
 
+    A project card whose global-parameter requirement is likely met only some generations from now is valued as
+    played then (production pays for fewer phases), with the requirement flags of now.
+
     `nested` is for valuations made inside another one (a hand card it unlocks): it skips unlock pricing,
     which would value cards again."""
     info = data.card(name) or {}
+    params = [r for r in info.get("req") or [] if re.match(r"^(max )?(temperature|oxygen|oceans|venus) ", r)]
+    if not nested and info.get("type") in PROJECT and name not in ctx.tableau and params and ctx.gens_left > 1:
+        # Only global parameters: tag requirements depend on your own plays (priced in _unlocks).
+        wait = max(_req_timing(req, ctx)[1] for req in params)
+        g = math.ceil(wait - 1e-9) if wait < ctx.gens_left else None
+        if g is None or g >= 1:
+            later = _later(ctx, g if g is not None else ctx.gens_left - 1)
+            v = _value_card(name, later, cost, buying, model, nested=True)
+            now = Valuation(name)
+            now.info = info
+            _requirements(now, ctx)
+            v.flags = [f for f in v.flags if not f.startswith("NOT PLAYABLE")] + now.flags + \
+                [f"valued as played in generation {ctx.generation + g} (when its requirement is likely met)"
+                 if g is not None else "requirement unlikely to be met before the last generation"]
+            return v
+    return _value_card(name, ctx, cost, buying, model, nested)
+
+
+def _value_card(name, ctx, cost=None, buying=False, model=None, nested=False):
+    info = data.card(name) or {}
     beh = card_behavior(name, ctx)
+    own = beh.get("behavior") or {}
+    if (name == "Helion" and not ctx.helion) or own.get("titaniumValue") or own.get("steelValue"):
+        # The card's own effects are priced at the rates it sets: Helion spends heat as M€, Boom Town lowers the
+        # titanium it produces to 2 M€.
+        ctx = copy.copy(ctx)
+        if name == "Helion":
+            ctx.helion, ctx.heat = True, max(ctx.heat, 1.0)
+        ctx.titanium += own.get("titaniumValue", 0)
+        ctx.steel += own.get("steelValue", 0)
     v = Valuation(name)
     v.info = info
     ctype = info.get("type")
@@ -630,7 +737,11 @@ def value_card(name, ctx, cost=None, buying=False, model=None, nested=False):
         v.manual.append("part of its play effect is custom code: read the card text")
     if beh.get("bespokeAction") and not beh.get("custom"):
         v.manual.append("its action is custom code: read the card text")
-    if beh.get("triggers") and not (name in OWN_TRIGGERS and name not in ctx.tableau):  # else priced in _plan
+    if name in EXCAVATION_PAYOUTS:
+        rate, why = table_dig_rate(ctx)
+        n = rate * ctx.gens_left
+        v.add(f"{EXCAVATION_PAYOUTS[name]:g} M€ per excavation by anyone ×{n:.1f} ({why})", EXCAVATION_PAYOUTS[name] * n)
+    if beh.get("triggers") and not (name in OWN_TRIGGERS and name not in ctx.tableau) and name not in PRICED_EFFECTS:
         v.manual.append("ongoing effect (" + ", ".join(beh["triggers"]) + "): value depends on future plays")
     if name in ("Convert Plants", "Convert Heat"):
         v.flags.append("uses 8 " + ("plants" if name == "Convert Plants" else "heat") + " (priced at 0: no other use)")
@@ -651,16 +762,67 @@ def value_card(name, ctx, cost=None, buying=False, model=None, nested=False):
     return v
 
 
+# Effects priced in value_card / _plan although the app runs them in custom code.
+PRICED_EFFECTS = ("Aridor", "Excavator Leasing")
+EXCAVATION_PAYOUTS = {"Excavator Leasing": 1}
+
+
+def _digs_on_play(card):
+    beh = data.behavior(card["name"] if isinstance(card, dict) else card) or {}
+    return bool(((beh.get("behavior") or {}).get("underworld") or {}).get("excavate"))
+
+
+def table_dig_rate(ctx):
+    """(excavations per generation by all players, why): the faster of the table's rate so far (excavated spaces
+    per finished generation), its excavation actions (one use each per generation) and what the deck's
+    excavating cards give at the usual rate of cards played."""
+    spaces = ctx.game.get("spaces") or []
+    done = sum(1 for sp in spaces if sp.get("excavator"))
+    past = done / max(1, ctx.generation - 1)
+    actions = sum(1 for p in ctx.players for c in p.get("tableau") or []
+                  if ((card_behavior(c["name"]).get("action") or {}).get("underworld") or {}).get("excavate"))
+    cards = deck.names(ctx.expansions)
+    share = sum(1 for c in cards if _digs_on_play(c)) / len(cards) if cards else 0.0
+    drawn = share * deck.CARDS_PLAYED_PER_GEN * len(ctx.players)
+    rate = max(past, actions + drawn)
+    why = f"{done} dug so far" if past >= actions + drawn else f"{actions} excavation actions + cards"
+    return rate, why
+
+
+SP_KIND = {"Power Plant:SP": "energy production", "Asteroid:SP": "temperature", "Aquifer": "ocean",
+           "Greenery": "greenery", "City": "city"}
+
+
+def main_effect(v, ctx):
+    """The kind of effect (as in SP_KIND) that makes up at least half of a card's value, or None."""
+    amounts = {
+        "energy production": v.prod.get("energy", 0) * ctx.phases * ctx.energy,
+        "temperature": v.raises["temperature"] * ctx.tr,
+        "ocean": v.tiles["ocean"] * (ctx.tr + OCEAN_ADJACENCY),
+        "greenery": v.tiles["greenery"] * (VP + ctx.tr),
+        "city": v.tiles["city"] * CITY_TILE,
+    }
+    kind, amount = max(amounts.items(), key=lambda kv: kv[1])
+    # Milestones and awards the effect reaches come with it (the standard project reaches them too).
+    shared = sum(a for label, a in v.parts if label.startswith("lets you claim") or " award " in label)
+    return kind if amount > 0 and amount >= 0.5 * (v.value - shared) else None
+
+
 def flag_cheaper_standard_projects(valuations, ctx):
-    """Flag project cards that a standard project matches in value for less: Energy Saving for +1 energy
-    production (and the milestone it reaches) is a dearer Power Plant. Each standard project is priced once."""
+    """Flag project cards that a standard project with the same main effect matches in value for less: Energy
+    Saving for +1 energy production (and the milestone it reaches) is a dearer Power Plant. Each standard
+    project is priced once."""
     sps = None
     for v in valuations:
         if v.info.get("type") not in ("automated", "active", "event") or v.value <= 0:
             continue
+        kind = main_effect(v, ctx)
+        if kind is None:
+            continue
         if sps is None:
             sps = [value_card(n, ctx, cost=c, nested=True) for n, c in SP_COSTS.items()]
-        sp = next((sp for sp in sps if sp.paid < v.paid and sp.value >= v.value - 0.5), None)
+        sp = next((sp for sp in sps if SP_KIND[sp.name] == kind and sp.paid < v.paid and sp.value >= v.value - 0.5),
+                  None)
         if sp:
             v.flags.append(f"STANDARD PROJECT does as much for less: {sp.name} ≈{sp.value:.0f} for {sp.paid:g} M€ "
                            f"(this ≈{v.value:.0f} for {v.paid:g} M€)")
@@ -720,8 +882,18 @@ def _price_action(action, v, ctx, tags, name, model):
     demand = {r: (_energy_demand(ctx, name) if r == "energy" else 0) for r in inputs}
     stock = {r: max(0.0, stock[r] - demand[r]) for r in inputs}
     converts = any((o.get("spend") or {}).get("resourcesHere") for o in options)
+    own_type = (data.card(name) or {}).get("resource")
+    # A card not played yet can only act once its requirements are likely met.
+    start = 0
+    if not owned:
+        waits = [_req_timing(req, ctx)[1] for req in (data.card(name) or {}).get("req", [])]
+        wait = max(waits, default=0.0)
+        start = G if wait >= G else math.ceil(wait - 1e-9)
+        if start >= G:
+            v.flags.append("its action never runs: the requirement is unlikely to be met in time")
+            return
     total, uses, dug, short = 0.0, 0, 0, False
-    for g in range(G):
+    for g in range(start, G):
         cg = _later(ctx, g)
         cg.dug = dug
         picks, lacking = [], False
@@ -734,8 +906,14 @@ def _price_action(action, v, ctx, tags, name, model):
             if need > here:
                 continue
             trial = Valuation(name)
-            _apply({k: x for k, x in opt.items() if k not in ("addResources", "title")}, trial, cg, tags, name)
-            add = _resolve(opt.get("addResources", 0), tags, cg)
+            # Resources this card's own later conversion spends count as added here, even when the action may
+            # put them on any card (Comet Aiming's asteroids).
+            to_any = opt.get("addResourcesToAnyCard")
+            self_fuel = converts and isinstance(to_any, dict) and to_any.get("type") == own_type
+            skip = ("addResources", "title") + (("addResourcesToAnyCard",) if self_fuel else ())
+            _apply({k: x for k, x in opt.items() if k not in skip}, trial, cg, tags, name)
+            add = _resolve(opt.get("addResources", 0), tags, cg) + \
+                (_resolve(to_any.get("count", 1), tags, cg) if self_fuel else 0)
             worth = trial.value + (add - need) * per_res
             # Adding fuel for a later conversion is worth nothing by itself but keeps the action going.
             if worth > 1e-9 or (add and converts and not need):
@@ -760,10 +938,106 @@ def _price_action(action, v, ctx, tags, name, model):
             # Production phase: energy left over becomes heat, other resources carry over.
             stock[r] = max(0.0, income[r] - demand[r]) if r == "energy" else stock[r] + income[r]
     if total > 0:
-        limited = f" of {G}, short of {'/'.join(inputs)}" if short else ""
+        limited = f" of {G - start}, short of {'/'.join(inputs)}" if short else ""
+        limited += f" from generation {ctx.generation + start} (requirement)" if start else ""
         v.add(f"action ×{uses}{limited} (≈{total / uses:.1f} each)", total)
     else:
         v.flags.append("its action pays nothing at current rates and resources")
+
+
+# --------------------------------------------------------------------------------------------- colonies
+
+TRADE_COST = 9               # M€ per trade (or 3 energy or 3 titanium), from the rules
+# Assumption: each colony tile is traded with about every other generation, paying its colony bonus to owners.
+COLONY_TRADES_PER_GEN = 0.5
+_COLONY_RES = {"microbe": "Microbe", "animal": "Animal", "floater": "Floater", "asteroid": "Asteroid", "data": "Data"}
+
+
+def colony_reward_value(text, n, ctx):
+    """M€ value of one colony reward text (build, trade or colony bonus) with n units."""
+    t = (text or "").lower()
+    left = ctx.left
+    if "production" in t:
+        res = next((r for r in ("steel", "titanium", "plant", "energy", "heat") if r in t), "megacredits")
+        res = "plants" if res == "plant" else res
+        return n * _unit(res, ctx) * (ctx.plant_phases if res == "plants" else ctx.phases)
+    if "vp" in t:
+        return n * VP
+    if re.search(r"\btr\b", t):
+        return n * ctx.tr
+    if "draw" in t:
+        return CARD + (n - 1) * 0.5 if "keep 1" in t else n * CARD
+    if "add" in t and "to any" in t:
+        kind = next((k for k in _COLONY_RES if k in t), None)
+        return n * (_best_target(ctx, _COLONY_RES[kind])[0] if kind else 1.0)
+    if "ocean" in t:
+        return (ctx.tr + OCEAN_ADJACENCY) if left["oceans"] else 0.0
+    if "venus" in t and "increase" in t:
+        return n * ctx.tr if left["venus"] else 0.0
+    if "lose" in t and "m€" in t:
+        return -n
+    for word, res in (("steel", "steel"), ("titanium", "titanium"), ("plant", "plants"), ("energy", "energy"),
+                      ("heat", "heat"), ("m€", "megacredits")):
+        if word in t:
+            return n * _unit(res, ctx)
+    return 1.0
+
+
+def _first_number(text, default=1):
+    m = re.search(r"\d+", text or "")
+    return int(m.group(0)) if m else default
+
+
+def _colony_models(ctx):
+    return [c for c in ctx.game.get("colonies") or [] if c.get("isActive", True) and data.colony(c["name"])]
+
+
+def colony_build_value(col, ctx, double=False):
+    """(M€, text) for building a colony on one tile: its build bonus (twice with Vital Colony) and the colony
+    bonus it pays you when anyone trades there."""
+    info = data.colony(col["name"])
+    build = info.get("build", "")
+    nth = len(col.get("colonies") or [])
+    m = re.match(r"Gain ([\d, or]+) VP", build)
+    n = [int(x) for x in re.findall(r"\d+", m.group(1))][min(nth, 2)] if m else _first_number(build)
+    bonus = colony_reward_value(build, n, ctx) * (2 if double else 1)
+    income = colony_reward_value(info.get("colonyBonus"), _first_number(info.get("colonyBonus")), ctx) * \
+        COLONY_TRADES_PER_GEN * ctx.phases
+    return bonus + income, f"{col['name']}: {build}" + (" ×2" if double else "")
+
+
+def best_colony_build(ctx, duplicates=False, double=False):
+    """(M€, text) for the best colony you can build now (a flat COLONY estimate without colony data)."""
+    me = ctx.me["color"]
+    options = [colony_build_value(c, ctx, double) for c in _colony_models(ctx)
+               if len(c.get("colonies") or []) < 3 and (duplicates or me not in (c.get("colonies") or []))]
+    if not options:
+        return (COLONY * (1.5 if double else 1), None) if not _colony_models(ctx) else (0.0, "no colony tile has room")
+    return max(options, key=lambda o: o[0])
+
+
+def trade_value(col, ctx):
+    """M€ from one trade with a colony at its track position now, your colony bonuses there included."""
+    info = data.colony(col["name"])
+    qty = info.get("tradeQty") or [1]
+    pos = min(max(0, col.get("trackPosition", 1)), len(qty) - 1)
+    mine = (col.get("colonies") or []).count(ctx.me["color"])
+    bonus = colony_reward_value(info.get("colonyBonus"), _first_number(info.get("colonyBonus")), ctx)
+    return colony_reward_value(info.get("trade"), qty[pos], ctx) + mine * bonus
+
+
+def fleet_value(ctx, extra=1):
+    """(M€, text) for `extra` more trade fleets: your fleets already take the best trades, each new one trades
+    once a generation with the next best colony, net of the trade's cost."""
+    models = _colony_models(ctx)
+    if not models:
+        return 0.0, "no colony tiles in play"
+    trades = sorted(((trade_value(c, ctx) - TRADE_COST, c["name"]) for c in models), reverse=True)
+    have = ctx.me.get("fleetSize", 1) or 1
+    picked = trades[have:have + extra]
+    worth = sum(max(0.0, t) for t, _ in picked)
+    text = ", ".join(f"{n} {t + TRADE_COST:.0f}" for t, n in picked) or "no colony left"
+    return worth * ctx.gens_left, f"next best trade {text} (−{TRADE_COST} per trade)"
 
 
 # --------------------------------------------------------------------------------------------- underworld
@@ -865,22 +1139,43 @@ def _context(v, ctx):
 _REQ = re.compile(r"^(max )?(\d+) (\w+) tag")
 
 
+def _card_resources(ctx, rtype=None):
+    """Resources on your played cards: of one type, or {type: count} for all."""
+    out = {}
+    for name, c in ctx.tableau.items():
+        n = c.get("resources") or 0
+        t = (data.card(name) or {}).get("resource")
+        if n and t:
+            out[t] = out.get(t, 0) + n
+    return out.get(rtype, 0) if rtype else out
+
+
 def requirement_status(req, ctx, extra_tags=()):
     """(met, text) for one requirement string from cards.json, or (None, text) if not checkable."""
+    anyone = req.endswith("(any player)")
     m = _REQ.match(req)
     if m:
         n, tag = int(m.group(2)), m.group(3)
-        have = ctx.tags.get(tag, 0) + ctx.tags.get("wild", 0) + list(extra_tags).count(tag)
-        return (have <= n if m.group(1) else have >= n), f"{tag} tags {have}/{n}"
+        if anyone:
+            have = sum((p.get("tags") or {}).get(tag, 0) for p in ctx.players) + list(extra_tags).count(tag)
+        else:
+            have = ctx.tags.get(tag, 0) + ctx.tags.get("wild", 0) + list(extra_tags).count(tag)
+        return (have <= n if m.group(1) else have >= n), f"{tag} tags {have}/{n}" + (" (any player)" if anyone else "")
     m = re.match(r"^(max )?(temperature|oxygen|oceans|venus|tr|cities|colonies|greeneries) (-?\d+)", req)
     if m:
-        n = int(m.group(3))
-        have = {"temperature": ctx.temp, "oxygen": ctx.oxygen, "oceans": ctx.oceans, "venus": ctx.venus,
-                "tr": ctx.me["terraformRating"], "cities": ctx.me["citiesCount"],
-                "colonies": ctx.me["coloniesCount"], "greeneries": None}[m.group(2)]
+        n, what = int(m.group(3)), m.group(2)
+        if anyone:
+            have = {"cities": sum(p.get("citiesCount", 0) for p in ctx.players),
+                    "colonies": sum(p.get("coloniesCount", 0) for p in ctx.players),
+                    "greeneries": ctx.greeneries()}.get(what)
+        else:
+            have = {"temperature": ctx.temp, "oxygen": ctx.oxygen, "oceans": ctx.oceans, "venus": ctx.venus,
+                    "tr": ctx.me["terraformRating"], "cities": ctx.me["citiesCount"],
+                    "colonies": ctx.me["coloniesCount"], "greeneries": ctx.my_greeneries}[what]
         if have is None:
             return None, req
-        return (have <= n if m.group(1) else have >= n), f"{m.group(2)} {have} (needs {'≤' if m.group(1) else '≥'}{n})"
+        return (have <= n if m.group(1) else have >= n), \
+            f"{what} {have} (needs {'≤' if m.group(1) else '≥'}{n}{', any player' if anyone else ''})"
     m = re.match(r"^(max )?(undergroundTokens|corruption) (\d+)$", req)
     if m:
         n, uw = int(m.group(3)), ctx.me.get("underworldData") or {}
@@ -891,7 +1186,59 @@ def requirement_status(req, ctx, extra_tags=()):
     if m:
         n, have = int(m.group(1)), ctx.me.get(_PROD_KEY[m.group(2)], 0) or 0
         return have >= n, f"{m.group(2)} production {have}/{n}"
+    m = re.match(r"^floaters (\d+)$", req)
+    if m:
+        n, have = int(m.group(1)), _card_resources(ctx, "Floater")
+        return have >= n, f"floaters {have}/{n}"
+    m = re.match(r"^resourceTypes (\d+)$", req)
+    if m:
+        n = int(m.group(1))
+        have = sum(1 for r in RESOURCES if (ctx.me.get(_STOCK_KEY[r], 0) or 0) > 0) + len(_card_resources(ctx))
+        return have >= n, f"resource types {have}/{n}"
     return None, req
+
+
+def custom_requirement(name, ctx):
+    """(met, text) for a play condition the app checks in custom code (not in the card's requirement list), or
+    None for a card without one."""
+    base = data.card_name(name) or name
+    corruption = {p["color"]: (p.get("underworldData") or {}).get("corruption", 0) or 0 for p in ctx.players}
+    mine = corruption.get(ctx.me["color"], 0)
+    if base == "Private Investigator":
+        more = [ctx.names[c] for c, n in corruption.items() if n > mine]
+        return bool(more), "needs a player with more corruption than you" + (f" ({', '.join(more)})" if more else ": none")
+    if base == "Class-action Lawsuit":
+        top = max(corruption.values()) if corruption else 0
+        leaders = [c for c, n in corruption.items() if n == top]
+        if len(leaders) != 1:
+            return False, f"needs one player with strictly the most corruption (tied at {top})"
+        who = "you" if leaders[0] == ctx.me["color"] else ctx.names[leaders[0]]
+        return True, f"targets {who} ({top} corruption)" + (": it hits YOU" if who == "you" else "")
+    if base == "Shipment to Earth":
+        short = [f"{n} {r}" for r, n in (("plants", 3), ("steel", 3)) if (ctx.me.get(r, 0) or 0) < n]
+        return not short, "needs 3 plants and 3 steel to lose" + (f" (short: {', '.join(short)})" if short else "")
+    return None
+
+
+def tile_space_status(name, ctx):
+    """(met, text) when the card's tile must go on a kind of space the board may lack, else None. A board without
+    volcanic spaces lets volcanic tiles go on any land space (as in the app)."""
+    tile = ((card_behavior(name, ctx).get("behavior") or {}).get("tile") or {})
+    if tile.get("on") != "volcanic":
+        return None
+    spaces = ctx.game.get("spaces") or []
+    volcanic = [s for s in spaces if s.get("highlight") == "volcanic"]
+    if not spaces:
+        return None
+    if not volcanic:
+        return True, "this board has no volcanic spaces: the tile may go on any land space"
+    free = [s["id"] for s in volcanic if s.get("tileType") is None or _is_hazard(s)]
+    return bool(free), f"volcanic spaces free: {', '.join(free) if free else 'none'}"
+
+
+def _is_hazard(space):
+    name = data.tile_name(space["tileType"]) if space.get("tileType") is not None else ""
+    return not space.get("color") and name.endswith(("Dust Storm", "Erosion"))
 
 
 def stock_shortfall(stock, ctx):
@@ -912,14 +1259,39 @@ def production_shortfall(prod, ctx):
     return None
 
 
+def _package_providers(name, tag, ctx):
+    """Offered opening cards other than `name` that would add a tag (their own copies of it, events left out)."""
+    out = []
+    for kind in ("corporation", "prelude", "project"):
+        for other in (ctx.offered or {}).get(kind, []):
+            info = data.card(other) or {}
+            if other != name and info.get("type") != "event":
+                out += [other] * (info.get("tags") or []).count(tag)
+    return out
+
+
 def _requirements(v, ctx):
     for req in v.info.get("req", []):
         met, text = requirement_status(req, ctx)
+        m = _REQ.match(req)
+        if met is False and ctx.offered and m and not m.group(1) and not req.endswith("(any player)"):
+            # Opening: the corporation, preludes and cards you keep count too.
+            need = int(m.group(2)) - (ctx.tags.get(m.group(3), 0) + ctx.tags.get("wild", 0))
+            providers = _package_providers(v.name, m.group(3), ctx)
+            if len(providers) >= need:
+                v.flags.append(f"requirement {text}: met if your package includes {need} of {', '.join(providers)}")
+                continue
         if met is False:
             v.flags.append(f"NOT PLAYABLE YET: {text}")
         elif met is None and "any player" not in req:
             v.manual.append(f"check requirement: {req}")
-    short = production_shortfall(v.prod, ctx) or stock_shortfall(v.stock, ctx)
+    custom = custom_requirement(v.name, ctx)
+    if custom:
+        v.flags.append(("NOT PLAYABLE YET: " if not custom[0] else "") + custom[1])
+    space = tile_space_status(v.name, ctx)
+    if space:
+        v.flags.append(("NOT PLAYABLE: " if not space[0] else "") + space[1])
+    short = production_shortfall(v.prod, ctx) or (None if custom else stock_shortfall(v.stock, ctx))
     if short and v.info.get("type") in PROJECT:
         v.flags.append(f"NOT PLAYABLE YET: {short}")
 
@@ -1177,7 +1549,12 @@ OWN_TRIGGERS = {
     "GMO Contract": [("tag:bio", [("mc", 2)], "+2 M€ per plant, animal or microbe tag")],
     "Soil Bacteria": [("tag:plant", [("plants", 1)], "+1 plant per plant tag"), ("tag:microbe", [("plants", 1)], "+1 plant per microbe tag")],
     "Albedo Plants": [("tag:plant", [("heat", 3)], "+3 heat per plant tag")],
+    "Saturn Systems": [("tag:jovian", [("prod:megacredits", 1)], "+1 M€ production per Jovian tag")],
 }
+# Effects that also pay when a rival does it (rivals draw from the same deck: each plays about as many matching
+# cards as you do).
+RIVAL_TRIGGERS = {"Saturn Systems": "tag:jovian"}
+_TAG_TYPES_SKIP = ("event", "wild", "clone")
 OWN_TRIGGERS["Ecological Zone:ares"] = OWN_TRIGGERS["Ecological Zone"]
 
 _NO_CARD_TRIGGERS = ("Convert Plants", "Convert Heat")
@@ -1226,9 +1603,17 @@ def _payout(kind, n, owner, ctx):
     return 0.0
 
 
+def _new_tag_types(tags, ctx):
+    return sorted({t for t in tags if t not in _TAG_TYPES_SKIP and not ctx.tags.get(t)})
+
+
 def _own_triggers(v, ctx, sim):
     counts = _trigger_counts(v, ctx, sim)
     v.trigger_counts = counts
+    if "Aridor" in ctx.tableau and v.name != "Aridor":
+        new = _new_tag_types(v.persistent_tags, ctx)
+        if new:
+            v.add(f"your Aridor: +1 M€ production per new tag type ({', '.join(new)})", len(new) * ctx.phases)
     for owner in ctx.tableau:
         if owner == v.name:
             continue
@@ -1538,7 +1923,7 @@ def _money(ctx):
     me = ctx.me
     income = me.get("terraformRating", 20) + me.get("megacreditProduction", 0) + \
         me.get("steelProduction", 0) * ctx.steel + me.get("titaniumProduction", 0) * ctx.titanium
-    held = me.get("megaCredits", 0) + me.get("steel", 0) * ctx.steel + me.get("titanium", 0) * ctx.titanium
+    held = me.get("megacredits", 0) + me.get("steel", 0) * ctx.steel + me.get("titanium", 0) * ctx.titanium
     return held + income * ctx.phases
 
 
@@ -1634,6 +2019,15 @@ def _plan(v, ctx, nested=False):
         label = f"effect ×{hand:.1f}" + (f" (incl. {own:g} own)" if own else "") if hand else "effect: no planned matches"
         v.add_combo(label, amount, keep=True)
 
+    if v.name in RIVAL_TRIGGERS and not owned:
+        event = RIVAL_TRIGGERS[v.name]
+        n = (len(ctx.players) - 1) * future_matches(ctx, event)
+        pays = OWN_TRIGGERS[v.name][0][1]
+        v.add_combo(f"rivals' {event[4:]} tags ×{n:.1f}",
+                    sum(_plan_payout(k, amt * n, v.name, ctx, ctx.gens_left / 2) for k, amt in pays))
+    if v.name == "Aridor" and not owned:
+        _aridor(v, ctx, plan)
+
     discount = beh.get("cardDiscount")
     if discount:
         for d in discount if isinstance(discount, list) else [discount]:
@@ -1670,6 +2064,37 @@ def _plan(v, ctx, nested=False):
 
     if not nested:
         _unlocks(v, ctx)
+
+
+def _aridor(v, ctx, plan):
+    """Aridor: +1 M€ production per new tag type. Each tag type you lack is counted with the chance that a
+    planned or drawn card brings it, at about the time the first one is expected."""
+    types = {t for c in deck.deck(ctx.expansions) for t in c.get("tags") or []} - set(_TAG_TYPES_SKIP)
+    total, n_types = 0.0, 0.0
+    for t in _new_tag_types(types, ctx):
+        items = _matches(plan, f"tag:{t}", ctx, kept=True) + [(future_matches(ctx, f"tag:{t}"), 0.0)]
+        expected = sum(n for n, _ in items)
+        if expected <= 0:
+            continue
+        p = 1 - math.exp(-expected)
+        delay = min(ctx.gens_left, ctx.gens_left / (1 + expected))
+        n_types += p
+        total += p * max(0.0, ctx.phases - delay)
+    v.add_combo(f"new tag types ×{n_types:.1f}", total, keep=True)
+    # The extra colony tile: your fleet trades with the best tile not in play when it beats the best one now.
+    models = _colony_models(ctx)
+    if models:
+        in_play = {c["name"] for c in models}
+        now = max((trade_value(c, ctx) for c in models), default=0.0)
+        new = max((trade_value({"name": n, "trackPosition": 1}, ctx) for n in _all_colonies() if n not in in_play),
+                  default=0.0)
+        if new > now:
+            v.add_combo("extra colony tile (better trade)", (new - max(now, TRADE_COST)) * ctx.gens_left
+                        if new > TRADE_COST else 0.0)
+
+
+def _all_colonies():
+    return list(data._load("colonies.json"))
 
 
 def _unlocks(v, ctx):

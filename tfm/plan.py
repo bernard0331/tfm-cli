@@ -37,11 +37,14 @@ Known limits (read the numbers as a plan, not a forecast):
 """
 import functools
 import itertools
+import math
 
 from . import data, deck, value
 
 VP = value.VP
 _PROFILES = {}  # stream_profile cache, shared by every simulation of the same game state
+_STREAM_PROD = {}  # production part of each stream_profile pick (same keys)
+_DECK_VALUES = {}  # value_card of deck cards at a later generation
 
 # Assumptions, each derived from the rules or from value.py's own conventions (not fitted to games).
 STREAM_CARDS_SEEN = deck.CARDS_SEEN_PER_GEN  # research shows 4 new cards per generation
@@ -91,12 +94,16 @@ class _State:
         self.stream = {}           # generation → average cards bought (fractions allowed: it is an expectation)
         self.stream_q = {}         # (generation, quarter of the deck) → share of that drawn card bought
         self.tokens = 0            # underground tokens claimed (for requirements such as Geothermal Network)
+        self.worth_buying = set()  # hand cards played at break-even or better (their 3 M€ purchase included)
+        self.metal_used = {}       # (generation, steel/titanium) → units spent on drawn cards
 
     def copy(self):
         s = _State.__new__(_State)
         s.__dict__.update(self.__dict__)
         for k in ("stock", "prod", "tags", "params", "stream", "stream_q"):
             setattr(s, k, dict(getattr(self, k)))
+        s.worth_buying = set(self.worth_buying)
+        s.metal_used = dict(self.metal_used)
         for k in ("tableau", "hand", "plays", "trace"):
             setattr(s, k, list(getattr(self, k)))
         return s
@@ -156,6 +163,11 @@ def _param_reqs_met(name, ctx):
     return True
 
 
+def _rival_req(req):
+    """True for a requirement that depends on other players or Turmoil (not simulated here)."""
+    return req.endswith("(any player)") or any(w in req for w in ("ruling", "chairman", "partyLeader"))
+
+
 def _digs(tableau):
     """Underground tokens your played cards' actions claim per generation (one use each)."""
     return sum(1 for c in tableau if ((value.card_behavior(c["name"]).get("action") or {}).get("underworld") or {})
@@ -191,6 +203,29 @@ def _share(modules, tag, events):
     return hits / len(cards) if cards else 0.0
 
 
+# Draft: you keep the best card of the 4 dealt, then of the 3, 2 and 1 passed to you. If rivals valued cards as
+# you do, each passed hand would hold only what they left (so your picks are just the 4 random cards in order);
+# if their tastes were unrelated to yours, each passed hand is a fresh random one. Assumed halfway: rivals take
+# the card you want half of the time.
+DRAFT_OVERLAP = 0.5
+
+
+def _pick_weights(n, draft, seen=4):
+    """For each card you keep in a generation (best first), the chance it is each card of a deck of n sorted
+    best first: the m-th best of `seen` random cards, or with a draft a mix of that and the best of seen-m+1."""
+    out = []
+    for m in range(1, seen + 1):
+        k = seen - m + 1
+        order = [math.comb(seen, m - 1) * (seen - m + 1) / n * (j / n) ** (m - 1) * ((n - j - 1) / n) ** (seen - m)
+                 for j in range(n)]
+        best = [((n - j) / n) ** k - ((n - j - 1) / n) ** k for j in range(n)]
+        mix = DRAFT_OVERLAP if draft else 1.0
+        weights = [mix * a + (1 - mix) * b for a, b in zip(order, best)]
+        total = sum(weights) or 1.0
+        out.append([w / total for w in weights])
+    return out
+
+
 def stream_matches(ctx, tag):
     """Expected plays with a tag among one generation's drawn cards (not yet in hand), from the deck's
     composition (tfm/deck.py). Simulated generations start with an empty hand, so this generation's draws count
@@ -209,17 +244,22 @@ class _Planner:
         self.gens = base.gens_left
         self.first_gen = base.generation
         self.n_players = len(base.players)
-        # Rivals' share of the table's terraforming pace (steps per generation).
-        self.rival_pace = 0.0 if self.n_players == 1 else base.pace * (self.n_players - 1) / self.n_players
+        # Rivals' share of the table's terraforming pace (steps per generation). The game ends when the parameters
+        # are done, so the table must finish the steps left within the projected generations: at least
+        # remaining / gens a generation, even when the pace so far (or the no-history default) is slower.
+        self.table_pace = max(base.pace, base.remaining_steps / max(1, self.gens))
+        self.rival_pace = 0.0 if self.n_players == 1 else self.table_pace * (self.n_players - 1) / self.n_players
         self.venus_on = bool(base.expansions.get("venus"))
         self.venus_counts = base.venus_counts
         # Drawn cards are priced against your tableau as it is now, without the hand's combos or awards.
         self.neutral = value.Outlook(dict(view, cardsInHand=[], game=dict(view["game"], awards=[], milestones=[])),
                                      gens_left=gens if gens is not None else base.gens_left)
+        self.draft = bool(view["game"]["gameOptions"].get("draftVariant")) and self.n_players > 1
         self.building_share = _tag_share(base.expansions, "building", events=True)
         self.space_share = _tag_share(base.expansions, "space", events=True)
         self._cache = {}
         self.unbought = set()  # hand cards whose 3 M€ purchase is paid when played (best_openings' trial)
+        self.preludes = [c["name"] for c in view.get("preludeCardsInHand") or []]  # what Double Down can copy
 
     # ---- contexts
 
@@ -238,7 +278,8 @@ class _Planner:
                   **{value._PROD_KEY[r]: s.prod[r] for r in RESOURCES},
                   **{value._STOCK_KEY[r]: s.stock[r] for r in RESOURCES})
         players = [me if q["color"] == me0["color"] else q for q in self.view["players"]]
-        return value.Outlook({"thisPlayer": me, "players": players, "game": game, "cardsInHand": []},
+        return value.Outlook({"thisPlayer": me, "players": players, "game": game, "cardsInHand": [],
+                              "_package_preludes": self.preludes, "_greeneries": s.greeneries},
                              gens_left=self.gens - i)
 
     def valuation(self, name, s, i, ctx):
@@ -269,6 +310,8 @@ class _Planner:
         # Discounts are applied by the simulation (hand cards and the future-card stream), so value.py's
         # discount on future draws (in v.combo) is not banked as well.
         out += sum(amt for label, amt in v.parts + v.combo if label.startswith("discount "))
+        # Aridor's production for a new tag type is applied by the simulation (apply).
+        out += sum(amt for label, amt in v.parts if label.startswith("your Aridor"))
         return out
 
     # ---- costs and requirements
@@ -306,22 +349,68 @@ class _Planner:
         hit = _PROFILES.get(key)
         if hit is None:
             later = value._later(ctx, i)
-            priced = sorted(((max(0.0, v.value) if _param_reqs_met(n, later) else 0.0, v.cost) for n, v in
-                             ((n, value.value_card(n, later, buying=True, nested=True)) for n in deck.names(ctx.expansions))),
-                            key=lambda vc: -vc[0] / (vc[1] + value.BUY_COST))
-            n = len(priced)
-            quarters = [priced[q * n // STREAM_CARDS_SEEN:(q + 1) * n // STREAM_CARDS_SEEN] for q in range(STREAM_CARDS_SEEN)]
-            hit = _PROFILES[key] = [(sum(x for x, _ in part) / len(part), sum(c for _, c in part) / len(part))
-                                    for part in quarters if part]
+            priced = []
+            for n in deck.names(ctx.expansions):
+                # A card whose global requirement is met only later is bought now and played then (at that
+                # generation's value), as players hold such cards.
+                v = None
+                for j in range(i, self.gens):
+                    at = later if j == i else value._later(ctx, j)
+                    if _param_reqs_met(n, at):
+                        v = self._deck_value(n, j, at)
+                        break
+                ok = v is not None and v.value > 0
+                prod = {r: x for r, x in v.prod.items() if r in RESOURCES and isinstance(x, (int, float))} if ok else {}
+                priced.append((v.value if ok else 0.0, v.cost if v else (data.card(n) or {}).get("cost") or 0, prod))
+            priced.sort(key=lambda vc: -vc[0] / (vc[1] + value.BUY_COST))
+            hit, _STREAM_PROD[key] = [], []
+            for weights in _pick_weights(len(priced), self.draft, STREAM_CARDS_SEEN):
+                worth = sum(w * x for w, (x, _, _) in zip(weights, priced))
+                cost = sum(w * c for w, (_, c, _) in zip(weights, priced))
+                # Average production change of the pick, and the M€ value_card gave it: production is applied to
+                # the simulated economy (so it pays for later cards) instead of being banked as VP.
+                prod = {r: sum(w * p.get(r, 0) for w, (_, _, p) in zip(weights, priced)) for r in RESOURCES}
+                prod_worth = sum(x * value._unit(r, later) * (later.plant_phases if r == "plants" else later.phases)
+                                 for r, x in prod.items())
+                hit.append((worth, cost))
+                _STREAM_PROD[key].append((prod, prod_worth))
+            _PROFILES[key] = hit
         return hit
 
+    def _deck_value(self, name, j, ctx):
+        key = (name, j, ctx.generation, ctx.temp, ctx.oxygen, ctx.oceans, ctx.venus, ctx.gens_left, tuple(ctx.tableau))
+        hit = _DECK_VALUES.get(key)
+        if hit is None:
+            hit = _DECK_VALUES[key] = value.value_card(name, ctx, buying=True, nested=True)
+        return hit
+
+    def stream_production(self, i, q):
+        """(average production change, its M€ value as priced) of the drawn card of quarter q in generation i."""
+        self.stream_profile(i)
+        ctx = self.neutral
+        key = (deck.names(ctx.expansions), tuple(sorted(ctx.me.get("tags", {}).items())), tuple(ctx.tableau),
+               ctx.generation, ctx.temp, ctx.oxygen, ctx.oceans, ctx.venus, self.gens, i)
+        return _STREAM_PROD[key][q]
+
     def stream_cost(self, s, i, q):
-        """(M€ out of pocket, steel, titanium) for the drawn card of quarter q: steel and titanium pay for the
-        deck's share of building and space cards."""
-        cost = max(0.0, self.stream_profile(i)[q][1] - self.discount(s, ()))
-        ti = min(s.stock["titanium"], self.space_share * cost / s.ti_value) if s.ti_value else 0.0
-        steel = min(s.stock["steel"], self.building_share * cost / s.steel_value) if s.steel_value else 0.0
-        return cost - ti * s.ti_value - steel * s.steel_value + value.BUY_COST, steel, ti
+        """(M€ out of pocket, steel, titanium) for the drawn card of pick q. Of the 4 cards seen, a player holding
+        titanium (steel) buys the space (building) ones first, so metal pays up to the deck's share of those tags
+        in the cost of all 4 seen cards each generation, spread over the cards bought."""
+        profile = self.stream_profile(i)
+        cost = max(0.0, profile[q][1] - self.discount(s, ()))
+        gen = self.first_gen + i
+        seen = sum(c for _, c in profile)
+        out = []
+        for res, share, unit in (("titanium", self.space_share, s.ti_value), ("steel", self.building_share, s.steel_value)):
+            if not unit:
+                out.append(0.0)
+                continue
+            budget = max(0.0, share * seen / unit - s.metal_used.get((gen, res), 0.0))
+            n = min(s.stock[res], budget, cost / unit)
+            cost -= n * unit
+            out.append(n)
+        ti, steel = out
+        return cost + value.BUY_COST, steel, ti
 
     def stream_options(self, s, i):
         out = []
@@ -335,7 +424,13 @@ class _Planner:
         info = data.card(name) or {}
         for req in info.get("req", []):
             met, _ = value.requirement_status(req, ctx)
-            if met is False:
+            if met is None and _rival_req(req):
+                # Rivals' tiles, tags and Turmoil are not simulated: assume they meet it by mid-game.
+                met = ctx.gens_left <= self.gens - self.gens // 2
+            if not met:
+                return False  # unmet, or not checkable here: never assume it is met
+        for check in (value.custom_requirement(name, ctx), value.tile_space_status(name, ctx)):
+            if check and not check[0]:
                 return False
         b = _modelled_part(value.card_behavior(name, ctx).get("behavior") or {}, ctx, info.get("tags") or [], name)
         for res, amt in (b.get("production") or {}).items():
@@ -397,6 +492,8 @@ class _Planner:
         if isinstance(vp, (int, float)):
             s.card_vp += vp
         if ctype != "event" and name not in value.STANDARD_BEHAVIORS:
+            if any(c["name"] == "Aridor" for c in s.tableau):
+                s.prod["megacredits"] += len(value._new_tag_types(persistent, ctx))
             for t in persistent:
                 s.tags[t] = s.tags.get(t, 0) + 1
             s.tableau.append({"name": name, "resources": 0})
@@ -406,16 +503,22 @@ class _Planner:
             s.ti_value += beh["behavior"]["titaniumValue"]
         s.banked += residual
 
-    def convert(self, s, gen):
+    def convert(self, s, gen, ctx=None):
         while s.stock["plants"] >= 8:
             s.stock["plants"] -= 8
             s.greeneries += 1
             self.raise_param(s, "oxygen", 1)
             s.plays.append((gen, "greenery (plants)"))
-        while s.stock["heat"] >= 8 and s.params["temperature"] < MAX["temperature"]:
+        helion = any(c["name"] == "Helion" for c in s.tableau)
+        # Helion spends heat as M€: 8 heat go to a temperature step only while a TR is worth more than 8 M€.
+        while s.stock["heat"] >= 8 and s.params["temperature"] < MAX["temperature"] and \
+                not (helion and ctx is not None and ctx.tr <= 8):
             s.stock["heat"] -= 8
             self.raise_param(s, "temperature", 1)
             s.plays.append((gen, "temperature (heat)"))
+        if helion:
+            s.stock["megacredits"] += s.stock["heat"]
+            s.stock["heat"] = 0.0
 
     def production(self, s):
         s.stock["heat"] += s.stock["energy"]
@@ -424,28 +527,62 @@ class _Planner:
         for res in RESOURCES:
             s.stock[res] += s.prod[res]
 
-    def rivals(self, s):
-        """Other players raise the global parameters at their share of the table pace."""
+    def rivals(self, s, i):
+        """Other players raise the global parameters at their share of the table pace, and at least enough that
+        the table (you included) keeps to the schedule that finishes terraforming in the projected generations:
+        your own steps from drawn cards are banked as VP, not simulated, so rivals stand in for them."""
         params = ["temperature", "oxygen", "oceans"] + (["venus"] if self.venus_counts else [])
         left = {p: max(0.0, (MAX[p] - s.params[p]) / STEP[p]) for p in params}
         total = sum(left.values())
-        if total:
+        if total and self.n_players > 1:
+            due = total - max(0.0, self.base.remaining_steps - (i + 1) * self.table_pace)
+            steps = max(self.rival_pace, due)
             for p in params:
-                s.params[p] = min(MAX[p], s.params[p] + min(left[p], self.rival_pace * left[p] / total) * STEP[p])
+                s.params[p] = min(MAX[p], s.params[p] + min(left[p], steps * left[p] / total) * STEP[p])
         if self.venus_on and not self.venus_counts:
             s.params["venus"] = min(MAX["venus"], s.params["venus"] + RIVAL_VENUS_STEPS * STEP["venus"])
 
     # ---- one generation
 
+    def tag_blocked(self, s, ctx):
+        """Hand cards held back only by your own tag requirements: {name: [(tag, count needed)]}."""
+        out = {}
+        for name in s.hand:
+            need, other = [], False
+            for req in (data.card(name) or {}).get("req", []):
+                met, _ = value.requirement_status(req, ctx)
+                m = value._REQ.match(req)
+                if met is False and m and not m.group(1) and not req.endswith("(any player)"):
+                    need.append((m.group(3), int(m.group(2))))
+                elif not met:
+                    other = True
+            if need and not other:
+                out[name] = need
+        return out
+
+    def unlock_bonus(self, name, s, i, ctx, blocked):
+        """Net M€ of the hand cards that playing `name` makes playable by adding its tags (for play order and
+        keep decisions only: the unlocked card's value is banked when it is played)."""
+        info = data.card(name) or {}
+        tags = [] if info.get("type") == "event" else info.get("tags") or []
+        bonus = 0.0
+        for other, need in blocked.items():
+            if other != name and all(s.tags.get(t, 0) + s.tags.get("wild", 0) + tags.count(t) >= n for t, n in need):
+                total, _ = self.valuation(other, s, i, ctx)
+                bonus += max(0.0, total - self.card_cost(other, s)[0])
+        return bonus
+
     def options(self, s, i, ctx):
         """Hand cards, standard projects and stream cards on offer: (ratio, kind, name, value, residual, cost)."""
         out = []
+        blocked = self.tag_blocked(s, ctx)
         for name in s.hand:
             if not self.playable(name, s, ctx):
                 continue
             total, residual = self.valuation(name, s, i, ctx)
             cost = self.card_cost(name, s)[0]
-            out.append((total / max(1.0, cost), "card", name, total, residual, cost))
+            unlock = self.unlock_bonus(name, s, i, ctx, blocked) if blocked else 0.0
+            out.append(((total + unlock) / max(1.0, cost), "card", name, total, residual, cost))
         out += self.sp_options(s, i, ctx)
         out += self.stream_options(s, i)
         out.sort(key=lambda o: -o[0])
@@ -471,7 +608,7 @@ class _Planner:
         last = i == self.gens - 1
         ctx = self.ctx(s, i)
         s.trace.append((gen, dict(s.params)))
-        self.convert(s, gen)
+        self.convert(s, gen, ctx)
         if i > 0:
             # Tag discounts also apply to the cards you will draw (general ones are in the average card's cost).
             for c in s.tableau:
@@ -492,7 +629,7 @@ class _Planner:
         s.reserve = 0.0
         s.tokens += _digs(s.tableau)
         self.production(s)
-        self.rivals(s)
+        self.rivals(s, i)
 
     def spend(self, s, i, ctx, opts, last):
         if s.commit and s.commit[0] == i:
@@ -531,7 +668,7 @@ class _Planner:
         """Play options in order while each returns at least `floor` per M€ and leaves `keep` M€."""
         gen = self.first_gen + i
         for ratio, kind, name, total, residual, _ in opts:
-            if ratio < floor or total <= 0:
+            if ratio < floor or ratio <= 0:
                 continue
             while True:
                 if kind == "card":
@@ -551,7 +688,12 @@ class _Planner:
                     s.stock["megacredits"] -= share * cost
                     s.stock["steel"] -= share * steel
                     s.stock["titanium"] -= share * ti
-                    s.stream_vp += share * total / VP
+                    for res, n in (("steel", steel), ("titanium", ti)):
+                        s.metal_used[(gen, res)] = s.metal_used.get((gen, res), 0.0) + share * n
+                    prod, prod_worth = self.stream_production(i, name)
+                    for r, x in prod.items():
+                        s.prod[r] += share * x
+                    s.stream_vp += share * (total - prod_worth) / VP
                     if gen not in s.stream:
                         s.plays.append((gen, STREAM))
                     s.stream[gen] = s.stream.get(gen, 0.0) + share
@@ -564,6 +706,8 @@ class _Planner:
                 s.stock["titanium"] -= ti
                 if kind == "card":
                     s.hand.remove(name)
+                    if ratio >= PLAY_RATIO:
+                        s.worth_buying.add(name)
                 self.apply(name, s, ctx, residual)
                 s.plays.append((gen, SP_LABEL.get(name, name)))
                 ctx = self.ctx(s, i)
@@ -583,7 +727,7 @@ class _Planner:
         s.reserve = 0.0
         s.tokens += _digs(s.tableau)
         self.production(s)
-        self.rivals(s)
+        self.rivals(s, i)
         for j in range(i + 1, self.gens):
             self.generation(s, j, branch=False)
         return self.result(s)
@@ -674,6 +818,7 @@ def opening(view, corporation, preludes=(), keep=(), gens=None, free=False, buy_
     starting M€ minus 3 M€ per kept card (none if `free`; with `buy_on_play` each card's 3 M€ is paid
     only when it is played), plays the corporation's and preludes' effects, then simulates the game."""
     planner = _Planner(view, gens)
+    planner.preludes = [data.card_name(n) or n for n in preludes]
     g = view["game"]
     s = _State()
     s.tr = 14 if planner.n_players == 1 else 20
@@ -699,33 +844,16 @@ def opening(view, corporation, preludes=(), keep=(), gens=None, free=False, buy_
 
 def opening_cards(view):
     """Corporations, preludes and project cards on offer in the opening decision."""
-    found = {}
-
-    def walk(node):
-        if isinstance(node, dict):
-            for c in node.get("cards") or []:
-                if isinstance(c, dict) and c.get("name"):
-                    found.setdefault(c["name"], None)
-            for key in ("options", "andOptions"):
-                for child in node.get(key) or []:
-                    walk(child)
-    walk(view.get("waitingFor"))
-    for key in ("dealtCorporationCards", "dealtPreludeCards", "dealtProjectCards"):
-        for c in view.get(key) or []:
-            found.setdefault(c["name"], None)
-    out = {"corporation": [], "prelude": [], "project": []}
-    for name in found:
-        t = (data.card(name) or {}).get("type")
-        out["corporation" if t == "corporation" else "prelude" if t == "prelude" else "project"].append(name)
-    return out
+    return value.offered_cards(view)
 
 
 def best_openings(view, cards=None, gens=None, top=3):
     """Rank corporation × prelude-pair bundles: [(Projection, corporation, preludes, kept cards)].
 
-    The kept hand for each bundle is the cards its plan plays when every offered project card costs its 3 M€
-    only when played (so a card is kept only if it is worth buying); the bundle is then rescored paying 3 M€
-    per kept card up front."""
+    The kept hand for each bundle is the cards its plan plays at break-even or better when every offered project
+    card costs its 3 M€ only when played (so a card is kept only if it is worth buying, whenever its requirement
+    lets it be played; cards played only with last-generation leftovers are not); the bundle is then rescored
+    paying 3 M€ per kept card up front."""
     cards = cards or opening_cards(view)
     pres = cards["prelude"]
     pairs = list(itertools.combinations(pres, min(PRELUDES_KEPT, len(pres)))) or [()]
@@ -733,8 +861,7 @@ def best_openings(view, cards=None, gens=None, top=3):
     for corp in cards["corporation"]:
         for pair in pairs:
             trial = opening(view, corp, pair, cards["project"], gens, buy_on_play=True)
-            played = {label for _, label in trial.plays}
-            keep = [n for n in cards["project"] if n in played]
+            keep = [n for n in cards["project"] if n in trial.state.worth_buying]
             ranked.append((opening(view, corp, pair, keep, gens), corp, pair, keep))
     ranked.sort(key=lambda r: -r[0].vp)
     return ranked[:top] if top else ranked
