@@ -26,7 +26,8 @@ Repeat until you see `GAME OVER`:
 
 1. `tfm -s <seat> turn`
    This waits up to 100 seconds for your turn, then prints the game state and your numbered choices.
-   If it prints `STILL WAITING`, run it again straight away and say nothing else. Waiting costs no thinking.
+   If it prints `STILL WAITING`, run it again straight away and say nothing else (unless voice chat
+   is on and someone spoke to you; see "Voice chat"). Waiting costs no thinking.
 2. Decide.
 3. `tfm -s <seat> play <id> [value ...]`
    This submits the choice. If more input is needed in the same turn (a placement, a second action),
@@ -92,6 +93,38 @@ the choices changed, use the new ids it printed.
   step of a parameter, planetary-track rewards, milestones you could claim, award placings it changes,
   requirements, rivals' payouts and attack blockers. `tfm -s <seat> turn --value` appends it to the
   turn. Use it for drafting, buying and close choices; it is an estimate, so read any `?` lines yourself.
+
+## Voice chat
+
+If your human says voice chat is on, you are also sitting in their Discord voice channel. A daemon
+transcribes what people say and speaks what you tell it to.
+
+- If `tfm -s <seat> voice status` says voice is off, run `tfm -s <seat> voice start` once.
+- `tfm turn`, `state` and `play` print a `VOICE CHAT` block with what was said since you last looked.
+- **Table talk** (when `voice status` shows it on): a fast auto-responder answers people for you
+  within seconds. Its replies show as `YOU (table-talk auto-reply)`; they are your words, so stay
+  consistent with them. It hands you anything that needs a real decision (a move, a deal, an undo),
+  shown as `asked you (needs YOUR answer)`.
+- Keep its notes current, so it can explain you: add `--note "..."` to a `play` when your thinking
+  changes (once a generation is plenty), or run `tfm -s <seat> voice notes "..."`. One to three
+  sentences about why you made recent moves and how you see the table. **Never put cards in your hand or
+  future plans in the notes** unless your human said voice is in open mode: the notes can be quoted aloud.
+- While you wait, `tfm turn` **returns early** when something needs your answer, printing
+  `YOU WERE ADDRESSED` and `NOT YOUR TURN YET`. Answer, then run `tfm turn` again straight away.
+- Speak with `tfm -s <seat> voice say "..."`. It returns immediately and speaks in the background,
+  so carry on playing. Never put `voice say` and `play` in the same shell call.
+
+How to talk:
+
+- **Always answer what's handed to you**, promptly, before your next game command if you can.
+- Keep it short and spoken: one or two sentences, no lists, no markdown, no card ids or numbers
+  nobody needs. Say "megacredits", not "M€".
+- Talk like a friendly player at the table. With table talk on, it handles the chatter; speak up
+  yourself only for handed-over questions and the odd big moment (a milestone, the last ocean).
+- Keep your hand and plans to yourself, as any player would. Don't lie about public game state.
+- Transcription can mishear names and cards; if a question is unclear, ask them to repeat it.
+- In confirm mode, propose moves out loud ("I'd like to play Birds, okay?") and treat a clear spoken
+  yes from your human as approval.
 
 ## Confirm mode
 
