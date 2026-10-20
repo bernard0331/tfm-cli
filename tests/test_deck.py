@@ -49,9 +49,12 @@ class Shares(unittest.TestCase):
             self.assertGreater(deck.share(BASE, event), 0, event)
         self.assertLessEqual(deck.share(BASE, "space_event"), deck.share(BASE, "event"))
 
-    def test_non_card_events_have_no_draw_share(self):
-        for event in ("temperature", "ocean", "city", "tr", "standard_project"):
-            self.assertEqual(deck.share(BASE, event), 0.0)
+    def test_effect_events_come_from_card_behavior(self):
+        # Tiles, steps and TR come from what drawn cards do (their exported behavior); standard projects never.
+        for event in ("temperature", "ocean", "city", "tr", "vpcard", "prodmc"):
+            self.assertGreater(deck.share(BASE, event), 0.0, event)
+        self.assertEqual(deck.share(BASE, "standard_project"), 0.0)
+        self.assertGreaterEqual(deck.share(BASE, "tr"), deck.share(BASE, "ocean") + deck.share(BASE, "temperature"))
 
     def test_expansions_setting_changes_the_deck(self):
         self.assertEqual(deck.share(BASE, "card:venus"), 0.0)

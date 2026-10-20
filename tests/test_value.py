@@ -413,7 +413,8 @@ class PlannedTableau(unittest.TestCase):
         # The real hook counts future draws from the deck (tests/test_deck.py checks the numbers).
         ctx = value.Outlook(view())
         self.assertGreater(value.future_matches(ctx, "tag:earth"), 0.0)
-        self.assertEqual(value.future_matches(ctx, "ocean"), 0.0)
+        self.assertGreater(value.future_matches(ctx, "ocean"), 0.0)
+        self.assertEqual(value.future_matches(ctx, "standard_project"), 0.0)
         with no_draws():
             base = self.worth("Point Luna", []).value
         with draws(lambda ctx, event: 2.0 if event == "tag:earth" else 0.0):

@@ -59,8 +59,9 @@ def names(expansions):
     return _names(_enabled(expansions or {}))
 
 
-def _per_card(card, event):
-    """How many times one play of `card` fires an OWN_TRIGGERS `event` (as value._trigger_counts counts it)."""
+def _per_card(card, event, name=""):
+    """How many times one play of `card` (named `name`) fires an OWN_TRIGGERS `event` (as value._trigger_counts
+    counts it)."""
     tags = card.get("tags") or []
     kind = card.get("type")
     if event.startswith("tag:"):
@@ -80,19 +81,65 @@ def _per_card(card, event):
         return 1 if not tags else 0
     if event == "onetag":
         return 1 if len(tags) == 1 else 0
-    return 0
+    if event == "multitag":
+        # Spire counts an event's own event tag too.
+        return 1 if len(tags) + (kind == "event") >= 2 else 0
+    if event == "orbital":
+        return 1 if "space" in tags and not set(tags) & PLANETARY_TAGS else 0
+    if event == "cheapevent":
+        return 1 if kind == "event" and (card.get("cost") or 0) <= 14 else 0
+    return effect_counts(name).get(event, 0) if name else 0
+
+
+PLANETARY_TAGS = {"venus", "earth", "mars", "jovian", "moon"}
+# M€ per production step by resource, for "production gained" triggers (Manutech): the rates value.py uses with
+# a typical game's Outlook (steel 2, titanium 3, a plant ≈ 1.6, heat ≈ 1.3 while temperature is open).
+PRODUCTION_UNIT = {"megacredits": 1.0, "steel": 2.0, "titanium": 3.0, "plants": 1.6, "energy": 1.0, "heat": 1.3}
+# Trigger events that come from what a card does (its behavior) rather than from its printed traits.
+EFFECT_EVENTS = ("city", "ocean", "greenery", "tile", "temperature", "oxygen", "venus", "tr", "colony",
+                 "prodmc", "prodcard", "vpcard", "token")
+
+
+@lru_cache(maxsize=None)
+def _effect_counts(name):
+    beh = data.behavior(name) or {}
+    b = beh.get("behavior") or {}
+    steps = b.get("global") or {}
+    num = lambda x: x if isinstance(x, (int, float)) else 0  # noqa: E731
+    oceans = (b["ocean"].get("count", 1) if isinstance(b["ocean"], dict) else 1) if "ocean" in b else 0
+    out = {"city": 1 if "city" in b else 0, "ocean": oceans, "greenery": 1 if "greenery" in b else 0,
+           "temperature": num(steps.get("temperature")), "oxygen": num(steps.get("oxygen")) + ("greenery" in b),
+           "venus": num(steps.get("venus")), "colony": 1 if "buildColony" in (b.get("colonies") or {}) else 0}
+    out["tile"] = out["city"] + out["ocean"] + out["greenery"] + (1 if "tile" in b else 0)
+    out["tr"] = num(b.get("tr")) + oceans + out["temperature"] + out["oxygen"] + out["venus"]
+    out["prodmc"] = sum(n * PRODUCTION_UNIT.get(r, 1.0) for r, n in (b.get("production") or {}).items()
+                        if isinstance(n, (int, float)) and n > 0)
+    out["prodcard"] = 1 if out["prodmc"] else 0
+    vp = beh.get("vp")
+    out["vpcard"] = 1 if vp is not None and not (isinstance(vp, (int, float)) and vp < 0) else 0
+    ex = (b.get("underworld") or {}).get("excavate")
+    out["token"] = num(ex if isinstance(ex, (int, float)) else (ex or {}).get("count", 1)) if ex else 0
+    return {k: n for k, n in out.items() if n}
+
+
+def effect_counts(name):
+    """How often one play of a card fires each EFFECT_EVENTS trigger, from its exported behavior (bonus steps from
+    thresholds and custom code left out)."""
+    return _effect_counts(name)
 
 
 def is_card_event(event):
-    """True for the trigger events a drawn project card can fire. Tile and parameter events (temperature,
-    ocean, city, TR...) depend on what the card does, not on its printed traits, so they count as 0 here."""
-    return event.startswith(("tag:", "card:")) or event in ("card", "event", "space_event", "cost20", "notags", "onetag")
+    """True for the trigger events a drawn project card can fire: its printed traits, and what its exported
+    behavior does (tiles, steps, TR, production gained; EFFECT_EVENTS)."""
+    return event.startswith(("tag:", "card:")) or event in (
+        "card", "event", "space_event", "cost20", "notags", "onetag", "multitag", "orbital", "cheapevent") or \
+        event in EFFECT_EVENTS
 
 
 @lru_cache(maxsize=None)
 def _share(modules, event):
-    cards = _deck(modules)
-    return sum(_per_card(c, event) for c in cards) / len(cards) if cards else 0.0
+    names = _names(modules)
+    return sum(_per_card(data.cards()[n], event, n) for n in names) / len(names) if names else 0.0
 
 
 def share(expansions, event):

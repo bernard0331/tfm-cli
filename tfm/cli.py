@@ -229,16 +229,23 @@ def _print_plan(view, names=(), opening=False, gens=None):
             keep = [k for k in keys if kinds[k] not in ("corporation", "prelude")]
             p = plan.opening(view, corps[0], pres, keep, gens)
             print(f"OPENING {corps[0]} + {', '.join(pres) or 'no preludes'} · keep {len(keep)}: ~{p.vp:.0f} VP")
+            ranked = plan.best_openings(view, offered, gens, top=None) if offered["corporation"] else []
+            if ranked:
+                print("  " + plan.rank_line(p.vp, ranked))
             print("\n".join(plan.describe(p)[1:]))
             return
-        ranked = plan.best_openings(view, offered, gens)
+        ranked = plan.best_openings(view, offered, gens, top=None)
         if not ranked:
             print("No opening decision found: name a corporation, preludes and cards to keep.")
             return
         print("OPENINGS by projected final VP (your economy only; kept cards = the ones its plan plays):")
-        for n, (p, corp, pres, keep) in enumerate(ranked, 1):
+        for n, (p, corp, pres, keep) in enumerate(ranked[:3], 1):
             print(f"  {n}. ~{p.vp:.0f} VP: {corp} + {', '.join(pres) or 'no preludes'} · keep {len(keep)}: "
                   + (", ".join(keep) or "none"))
+        worst = ranked[-1]
+        print(f"  spread: ~{ranked[0][0].vp:.0f} best to ~{worst[0].vp:.0f} worst over {len(ranked)} bundles "
+              f"(worst: {worst[1]} + {', '.join(worst[2]) or 'no preludes'}); "
+              "name a bundle to see its rank")
         print("\n".join(plan.describe(ranked[0][0])[1:]))
         return
     p = plan.project(view, gens=gens)
@@ -452,7 +459,8 @@ def main(argv=None):
     p.add_argument("names", nargs="*", help="cards to price as projected VP with minus without; with --opening, "
                    "a corporation, preludes and cards to keep")
     p.add_argument("--opening", action="store_true",
-                   help="score corporation + preludes + kept hand as one bundle (default: rank the offered ones)")
+                   help="score corporation + preludes + kept hand as one bundle, with its rank among the offered "
+                        "bundles (default: the top 3 offered bundles and the spread from best to worst)")
     p.add_argument("--gens", type=int, help="override the estimated generations left (including this one)")
     p.set_defaults(fn=cmd_plan)
 

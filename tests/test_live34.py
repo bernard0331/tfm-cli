@@ -90,8 +90,11 @@ class CustomCode(unittest.TestCase):
         v = colonies(view(), ("Titania", [], 1), ("Ceres", [], 1))
         v["preludeCardsInHand"] = [{"name": "Vital Colony"}]
         val = value.value_card("Vital Colony", value.Outlook(v))
-        self.assertTrue(any("Titania: Gain 5, 3, or 2 VP ×2" in label for label, _ in val.parts), val.parts)
-        self.assertGreaterEqual(val.value, 2 * 5 * value.VP - 10)
+        self.assertTrue(any("Titania: Gain 5 VP ×2" in label for label, _ in val.parts), val.parts)
+        # Twice the 5 VP, less the owner's 3 M€ for each trade expected at Titania (its trades pay 2 VP: frequent).
+        ctx = value.Outlook(v)
+        trades = value.tile_trade_rates(ctx)["Titania"] * ctx.gens_left
+        self.assertAlmostEqual(val.value, 2 * 5 * value.VP - 3 * trades)
 
     def test_double_down_copies_the_other_prelude(self):
         v = view()

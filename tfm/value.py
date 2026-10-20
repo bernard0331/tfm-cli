@@ -215,7 +215,8 @@ def card_behavior(name, ctx=None):
     custom = custom(ctx) if callable(custom) else custom
     out = dict(beh, custom=True)
     for key, part in custom.items():
-        out[key] = dict(beh.get(key) or {}, **part) if isinstance(part, dict) and key == "behavior" else part
+        out[key] = dict(beh.get(key) or {}, **part) if isinstance(part, dict) and key in ("behavior", "firstAction") \
+            else part
     return out
 
 
@@ -318,6 +319,10 @@ class Outlook:
             self.heat = max(self.heat, 1.0)
         # The opening decision: the offered corporations, preludes and project cards form the package.
         self.offered = offered_cards(view) if not self.tableau and view.get("dealtCorporationCards") else None
+        # Project cards the player holds or keeps (the opening package's kept cards in tfm plan), for effects that
+        # play a card from hand (Eccentric Sponsor, Valuable Gases).
+        self.package_hand = list(view.get("_package_hand") or [c["name"] for c in self.hand] or
+                                 (self.offered or {}).get("project", []))
         self.preludes = list(view.get("_package_preludes") or
                              [c["name"] for c in view.get("preludeCardsInHand") or []] or
                              (self.offered or {}).get("prelude", []))
@@ -368,6 +373,7 @@ class Valuation:
         self.tokens = 0      # underground tokens claimed (Tunneler, Excavator)
         self.attack = False
         self.combo = []      # (label, M€) priced from the planned tableau; printed on one line
+        self.simulated = 0.0  # M€ of effects tfm plan applies step by step itself (not banked as a lump)
 
     def add(self, label, amount):
         if amount:
@@ -586,10 +592,19 @@ def _apply(beh, v, ctx, card_tags, card_name, scale=1.0, label=""):
         col = beh["colonies"]
         if "buildColony" in col:
             opts = col["buildColony"] if isinstance(col["buildColony"], dict) else {}
-            worth, where = best_colony_build(ctx, duplicates=bool(opts.get("allowDuplicates")),
-                                             double=bool(opts.get("doubleBonus")))
-            v.colonies += scale
-            v.add(f"{pre}colony" + (f" ({where})" if where else " (placement bonus + owner bonuses)"), worth * scale)
+            n = opts.get("count", 1)
+            builds = colony_builds(ctx, duplicates=bool(opts.get("allowDuplicates")), double=bool(opts.get("doubleBonus")))
+            v.colonies += n * scale
+            if not builds:
+                worth = COLONY * (1.5 if opts.get("doubleBonus") else 1) if not _colony_models(ctx) else 0.0
+                v.add(f"{pre}colony" + (" (placement bonus + owner bonuses)" if worth else " (no colony tile has room)"),
+                      n * worth * scale)
+            else:
+                picked = builds[:n] if not opts.get("allowDuplicates") else [builds[0]] * n
+                v.add(f"{pre}colon{'ies' if n > 1 else 'y'} (" + "; ".join(t for _, t, _ in picked) + ")",
+                      sum(w for w, _, _ in picked) * scale)
+                if len(builds) > 1:
+                    v.flags.append("colony tiles compared: " + ", ".join(f"{name} ≈{w:.0f}" for w, _, name in builds[:5]))
         if col.get("addTradeFleet"):
             worth, why = fleet_value(ctx, col["addTradeFleet"])
             v.add(f"{pre}+{col['addTradeFleet']} trade fleet ({why})", worth * scale)
@@ -630,7 +645,9 @@ def _apply(beh, v, ctx, card_tags, card_name, scale=1.0, label=""):
         v.manual.append(("raises" if beh["steelValue"] > 0 else "lowers") +
                         " your steel value: count your remaining building cards")
     if beh.get("greeneryDiscount"):
-        v.add(f"{pre}greeneries cost 1 plant less", ctx.plant * ctx.plant_phases * 0.5)
+        v.add(f"{pre}greeneries cost 1 plant less", ctx.plant * ctx.plant_phases * 0.5 * scale)
+        v.simulated += ctx.plant * ctx.plant_phases * 0.5 * scale  # tfm plan converts at 7 plants itself
+    _apply_setup_effects(beh, v, ctx, card_tags, card_name, scale, pre)
 
 
 def value_card(name, ctx, cost=None, buying=False, model=None, nested=False):
@@ -741,7 +758,8 @@ def _value_card(name, ctx, cost=None, buying=False, model=None, nested=False):
         rate, why = table_dig_rate(ctx)
         n = rate * ctx.gens_left
         v.add(f"{EXCAVATION_PAYOUTS[name]:g} M€ per excavation by anyone ×{n:.1f} ({why})", EXCAVATION_PAYOUTS[name] * n)
-    if beh.get("triggers") and not (name in OWN_TRIGGERS and name not in ctx.tableau) and name not in PRICED_EFFECTS:
+    if beh.get("triggers") and not (name in OWN_TRIGGERS and name not in ctx.tableau) and name not in PRICED_EFFECTS \
+            and not beh.get("custom"):
         v.manual.append("ongoing effect (" + ", ".join(beh["triggers"]) + "): value depends on future plays")
     if name in ("Convert Plants", "Convert Heat"):
         v.flags.append("uses 8 " + ("plants" if name == "Convert Plants" else "heat") + " (priced at 0: no other use)")
@@ -948,8 +966,9 @@ def _price_action(action, v, ctx, tags, name, model):
 # --------------------------------------------------------------------------------------------- colonies
 
 TRADE_COST = 9               # M€ per trade (or 3 energy or 3 titanium), from the rules
-# Assumption: each colony tile is traded with about every other generation, paying its colony bonus to owners.
-COLONY_TRADES_PER_GEN = 0.5
+# Assumption: about half of the players' trade fleets trade each generation (a trade costs 9 M€ for a return that
+# beats it only once a track has moved up). Those trades go to the tiles in proportion to what a trade there pays.
+TRADES_PER_PLAYER = 0.5
 _COLONY_RES = {"microbe": "Microbe", "animal": "Animal", "floater": "Floater", "asteroid": "Asteroid", "data": "Data"}
 
 
@@ -992,38 +1011,64 @@ def _colony_models(ctx):
     return [c for c in ctx.game.get("colonies") or [] if c.get("isActive", True) and data.colony(c["name"])]
 
 
-def colony_build_value(col, ctx, double=False):
+def _trade_qty(col, bump=0):
+    qty = (data.colony(col["name"]) or {}).get("tradeQty") or [1]
+    return qty[min(max(0, col.get("trackPosition", 1) + bump), len(qty) - 1)]
+
+
+def tile_trade_rates(ctx):
+    """{tile: expected trades there per generation by all players}: TRADES_PER_PLAYER per player, split over the
+    tiles in proportion to what a trade pays at the track position now (at least a quarter of the trade cost, so
+    every tile sees some trades)."""
+    models = _colony_models(ctx)
+    weights = {c["name"]: max(TRADE_COST / 4, colony_reward_value(data.colony(c["name"]).get("trade"), _trade_qty(c), ctx))
+               for c in models}
+    total = sum(weights.values())
+    return {n: TRADES_PER_PLAYER * len(ctx.players) * w / total for n, w in weights.items()} if total else {}
+
+
+def colony_build_value(col, ctx, double=False, rates=None):
     """(M€, text) for building a colony on one tile: its build bonus (twice with Vital Colony) and the colony
-    bonus it pays you when anyone trades there."""
+    bonus it pays you each time anyone trades there (Titania's bonus is a loss: 3 M€ per trade)."""
     info = data.colony(col["name"])
     build = info.get("build", "")
     nth = len(col.get("colonies") or [])
     m = re.match(r"Gain ([\d, or]+) VP", build)
     n = [int(x) for x in re.findall(r"\d+", m.group(1))][min(nth, 2)] if m else _first_number(build)
     bonus = colony_reward_value(build, n, ctx) * (2 if double else 1)
-    income = colony_reward_value(info.get("colonyBonus"), _first_number(info.get("colonyBonus")), ctx) * \
-        COLONY_TRADES_PER_GEN * ctx.phases
-    return bonus + income, f"{col['name']}: {build}" + (" ×2" if double else "")
+    rate = (rates if rates is not None else tile_trade_rates(ctx)).get(col["name"], 0.0)
+    per_trade = colony_reward_value(info.get("colonyBonus"), _first_number(info.get("colonyBonus")), ctx)
+    income = per_trade * rate * ctx.gens_left
+    shown = f"Gain {n} VP" if m else build
+    text = f"{col['name']}: {shown}" + (" ×2" if double else "") + \
+        f", {info.get('colonyBonus')} ×{rate * ctx.gens_left:.1f} trades"
+    return bonus + income, text
+
+
+def colony_builds(ctx, duplicates=False, double=False):
+    """[(M€, text, tile)] for every colony tile you can build on now, best first."""
+    me = ctx.me["color"]
+    rates = tile_trade_rates(ctx)
+    out = [colony_build_value(c, ctx, double, rates) + (c["name"],) for c in _colony_models(ctx)
+           if len(c.get("colonies") or []) < 3 and (duplicates or me not in (c.get("colonies") or []))]
+    return sorted(out, key=lambda o: -o[0])
 
 
 def best_colony_build(ctx, duplicates=False, double=False):
     """(M€, text) for the best colony you can build now (a flat COLONY estimate without colony data)."""
-    me = ctx.me["color"]
-    options = [colony_build_value(c, ctx, double) for c in _colony_models(ctx)
-               if len(c.get("colonies") or []) < 3 and (duplicates or me not in (c.get("colonies") or []))]
-    if not options:
+    builds = colony_builds(ctx, duplicates, double)
+    if not builds:
         return (COLONY * (1.5 if double else 1), None) if not _colony_models(ctx) else (0.0, "no colony tile has room")
-    return max(options, key=lambda o: o[0])
+    return builds[0][:2]
 
 
-def trade_value(col, ctx):
-    """M€ from one trade with a colony at its track position now, your colony bonuses there included."""
+def trade_value(col, ctx, bump=0):
+    """M€ from one trade with a colony at its track position now (moved `bump` steps up first), your colony
+    bonuses there included."""
     info = data.colony(col["name"])
-    qty = info.get("tradeQty") or [1]
-    pos = min(max(0, col.get("trackPosition", 1)), len(qty) - 1)
     mine = (col.get("colonies") or []).count(ctx.me["color"])
     bonus = colony_reward_value(info.get("colonyBonus"), _first_number(info.get("colonyBonus")), ctx)
-    return colony_reward_value(info.get("trade"), qty[pos], ctx) + mine * bonus
+    return colony_reward_value(info.get("trade"), _trade_qty(col, bump), ctx) + mine * bonus
 
 
 def fleet_value(ctx, extra=1):
@@ -1038,6 +1083,353 @@ def fleet_value(ctx, extra=1):
     worth = sum(max(0.0, t) for t, _ in picked)
     text = ", ".join(f"{n} {t + TRADE_COST:.0f}" for t, n in picked) or "no colony left"
     return worth * ctx.gens_left, f"next best trade {text} (−{TRADE_COST} per trade)"
+
+
+# --------------------------------------------------------------------------------------------- corporations, preludes
+# Corporation and prelude effects the app runs in custom code, priced from the card text and the rules (not fitted to
+# game results). Similar effects share one helper: an extra prelude or corporation drawn (best of k from this game's
+# pool), colony-track moves and trades, a card played from hand, effects that pay each generation. Effects fired by
+# later plays (per tag, per tile, per TR) are OWN_TRIGGERS / RIVAL_TRIGGERS entries further down.
+
+# A requirement card played earlier than its requirement allows (Ecology Experts, Inventrix's ±2 steps): about one
+# generation of a typical card's income. Assumption: the deck's average card returns ~4 M€ a generation.
+EARLY_PLAY = 4.0
+# Cards whose effect draws more preludes or corporations: left out of the pools they draw from (no recursion).
+_DRAWS_SETUP = ("New Partner", "Board of Directors", "Merger", "Double Down", "Co-leadership", "Valley Trust")
+_POOLS = {}
+
+
+def _neutral(ctx):
+    """ctx without your tableau, hand or opening package: what a drawn prelude or corporation is worth by itself."""
+    c = copy.copy(ctx)
+    c.tableau, c.hand, c.package_hand, c.preludes, c.offered = {}, [], [], [], None
+    c._planned, c._afford = [], 1.0
+    c.__dict__.pop("notes", None)
+    return c
+
+
+def setup_pool(ctx, kind):
+    """Sorted values of the preludes (or corporations) this game's modules put in its deck, priced against ctx's
+    game state without your tableau. Cached per game state."""
+    modules = deck._enabled(ctx.expansions)
+    key = (kind, modules, ctx.gens_left, ctx.generation, len(ctx.players), ctx.left["oceans"], ctx.left["oxygen"],
+           ctx.left["temperature"], tuple(sorted(c["name"] for c in _colony_models(ctx))))
+    if key not in _POOLS:
+        base = _neutral(ctx)
+        _POOLS[key] = sorted(value_card(name, base, nested=True).value for name, c in data.cards().items()
+                             if c.get("type") == kind and c.get("module") in modules and name not in _DRAWS_SETUP)
+    return _POOLS[key]
+
+
+def best_of(values, k, cost=0.0, optional=False):
+    """Expected value of the best of k drawn from `values` (with replacement), minus `cost`; with `optional` the
+    draw may be discarded, so a draw worth less than its cost counts as 0."""
+    n = len(values)
+    if not n or k <= 0:
+        return 0.0
+    out, prev = 0.0, 0.0
+    for i, x in enumerate(sorted(values)):
+        cdf = ((i + 1) / n) ** k
+        out += (max(0.0, x - cost) if optional else x - cost) * (cdf - prev)
+        prev = cdf
+    return out
+
+
+def extra_setup_card(ctx, kind, draw, cost=0.0, optional=False):
+    """(M€, text) for drawing `draw` preludes (or corporations) and playing the best: Valley Trust, New Partner,
+    Merger, Board of Directors."""
+    pool = setup_pool(ctx, kind)
+    worth = best_of(pool, draw, cost, optional)
+    return worth, f"best of {draw} {kind}s drawn (pool of {len(pool)}, mean ≈{sum(pool) / max(1, len(pool)):.0f})" + \
+        (f" − {cost:g} M€" if cost else "")
+
+
+def free_trade_value(ctx, bump=0):
+    """M€ of one trade without paying for it, at your best colony tile (0 without colony tiles)."""
+    return max((trade_value(c, ctx, bump) for c in _colony_models(ctx)), default=0.0)
+
+
+def trade_all_value(ctx, bump=1):
+    """(M€, text) for trading with every active colony tile at once, each track first moved `bump` steps up
+    (Trade Advance)."""
+    models = _colony_models(ctx)
+    if not models:
+        return 0.0, "no colony tiles in play"
+    parts = [(trade_value(c, ctx, bump), c["name"]) for c in models]
+    return sum(w for w, _ in parts), ", ".join(f"{n} {w:.0f}" for w, n in parts)
+
+
+def colony_track_value(ctx, steps):
+    """(M€, text) for moving every colony track `steps` up (Early Colonization): your next trade pays more at
+    the tile it gains most on. Rivals' trades gain too, but rival gains are not priced here."""
+    models = _colony_models(ctx)
+    if not models:
+        return 0.0, "no colony tiles in play"
+    gain, name = max((trade_value(c, ctx, steps) - trade_value(c, ctx), c["name"]) for c in models)
+    return gain, f"your next trade: {name} +{gain:.0f}"
+
+
+def _hand_cards(ctx):
+    return [n for n in ctx.package_hand if (data.card(n) or {}).get("type") in PROJECT]
+
+
+def _floater_card(name, active=False):
+    info = data.card(name) or {}
+    return info.get("resource") == "Floater" and (not active or info.get("type") == "active")
+
+
+def play_from_hand(ctx, opts):
+    """(M€, text, card) for a prelude that plays a card from your hand: the M€ it saves (Eccentric Sponsor's
+    discount), floaters it adds and a requirement it skips. Without a known hand, the chance a 5-card hand holds a
+    fitting card comes from the deck."""
+    def fits(name):
+        info = data.card(name) or {}
+        return (not opts.get("tag") or opts["tag"] in (info.get("tags") or [])) and \
+            (not opts.get("floaterActive") or _floater_card(name, active=True))
+
+    def gain(name):
+        info = data.card(name) or {}
+        out = min(opts.get("discount", 0), info.get("cost") or 0)
+        if opts.get("floaters") and _floater_card(name):
+            out += opts["floaters"] * _resource_vp_value(name, ctx)
+        if opts.get("ignoreReqs") and any(re.match(r"^(max )?(temperature|oxygen|oceans|venus) ", r)
+                                          for r in info.get("req") or []):
+            out += EARLY_PLAY
+        return out
+    hand = [n for n in _hand_cards(ctx) if fits(n)]
+    if hand:
+        best = max(hand, key=gain)
+        return gain(best), f"plays {best} from hand", best
+    cards = [c for c in deck.names(ctx.expansions) if fits(c)]
+    if not cards:
+        return 0.0, "no fitting card in this deck", None
+    p = 1 - (1 - len(cards) / max(1, len(deck.names(ctx.expansions)))) ** 5
+    mean = sum(gain(c) for c in cards) / len(cards)
+    return p * mean, f"a fitting card in a 5-card hand p≈{p:.2f}", None
+
+
+def _cards_bought(ctx):
+    """Cards you will still buy: CARDS_PLAYED_PER_GEN in each research phase to come."""
+    return deck.CARDS_PLAYED_PER_GEN * deck.draw_gens(ctx)
+
+
+def _standard_project_net(ctx):
+    """Best standard project's value minus its cost now (Established Methods must perform two)."""
+    return max(value_card(n, ctx, cost=c, nested=True).net for n, c in SP_COSTS.items())
+
+
+def _agricola(ctx):
+    """Agricola Inc: at game end −2/0/1/2 VP per tag type for 0/1-2/3-4/5+ tags. Tags kept now plus the expected
+    kept tags of the cards you will play (deck rates), rounded to whole tags."""
+    types = {t for c in deck.deck(ctx.expansions) for t in c.get("tags") or []} - set(_TAG_TYPES_SKIP)
+    points = 0
+    for t in types:
+        n = round(ctx.tags.get(t, 0) + deck.future_matches(ctx, f"tag:{t}"))
+        points += -2 if n == 0 else 0 if n <= 2 else 1 if n <= 4 else 2
+    return points * VP
+
+
+def _orbital_value(ctx):
+    """Adhai High Orbit Constructions: each 2 orbitals take 1 M€ off later space cards without a planet tag,
+    standard colony projects and trades. An orbital gained now pays ½ M€ on each of those still to come (about
+    half the game's on average)."""
+    later = deck.future_matches(ctx, "orbital") + (ctx.gens_left if _colony_models(ctx) else 0) * TRADES_PER_PLAYER
+    return 0.5 * later / 2
+
+
+def _darkside(ctx):
+    """The Darkside of The Moon Syndicate: 1 titanium adds a fleet; a fleet steals 2 M€ from each opponent."""
+    return {"action": {"or": {"behaviors": [
+        {"spend": {"titanium": 1}, "addResources": 1, "title": "add a syndicate fleet"},
+        {"spend": {"resourcesHere": 1}, "stock": {"megacredits": 2 * len(ctx.rivals)}, "title": "steal 2 M€ each"}]}}} \
+        if ctx else {}
+
+
+SETUP_BEHAVIORS = {
+    # Extra preludes and corporations.
+    "Valley Trust": {"firstAction": {"extraSetup": {"kind": "prelude", "draw": 3}}},
+    "New Partner": {"behavior": {"extraSetup": {"kind": "prelude", "draw": 2}}},
+    "Merger": {"behavior": {"extraSetup": {"kind": "corporation", "draw": 4, "cost": 42}}},
+    # One prelude a generation while directors last (4): drawn, then played for 12 M€ or discarded.
+    "Board of Directors": {"action": {"spend": {"resourcesHere": 1},
+                                      "extraSetup": {"kind": "prelude", "draw": 1, "cost": 12, "optional": True}}},
+    # Colonies and trades.
+    "Trade Advance": {"behavior": {"stock": {"megacredits": 2}, "tradeAll": 1}},
+    "Early Colonization": {"behavior": {"colonyTracks": 2}},
+    "Aerospace Mission": {"behavior": {"colonies": {"buildColony": {"count": 2}}}},
+    "Prospecting": {"behavior": {"colonies": {"buildColony": {}}}},
+    "Huygens Observatory": {"behavior": {"colonies": {"buildColony": {"allowDuplicates": True}}, "tradeFree": 1}},
+    # A card played from hand (tfm plan plays it; see plan.PLAY_FROM_HAND).
+    "Eccentric Sponsor": {"behavior": {"playFromHand": {"discount": 25}}},
+    "Ecology Experts": {"behavior": {"playFromHand": {"ignoreReqs": True}}},
+    "Valuable Gases": {"behavior": {"playFromHand": {"tag": "venus", "floaters": 4}}},
+    "Valuable Gases:Pathfinders": {"behavior": {"stock": {"megacredits": 10},
+                                                "playFromHand": {"floaterActive": True, "ignoreReqs": True, "floaters": 5}}},
+    # Cards drawn by tag (the generic draw prices any card the same).
+    "Atmospheric Enhancers": {"behavior": {"drawCard": {"count": 2, "tag": "floater"}}},
+    "Nobel Prize": {"behavior": {"drawCard": 2}},
+    "Personal Agenda": {"behavior": {"drawCard": 3}},
+    "Planetary Alliance": {"behavior": {"drawCard": 2}},
+    "High Circles": {"behavior": {"drawCard": 1}},
+    "Political Uprising": {"behavior": {"drawCard": 1}},
+    "Celestic": {"firstAction": {"drawCard": 2}},
+    "Morning Star Inc.": {"firstAction": {"drawCard": 3}, "behavior": {"earlyPlay": 1}},
+    "Spire": {"firstAction": {"drawCard": {"count": 4, "keep": 1}}},
+    "Eris": {"firstAction": {"drawCard": 1}, "action": {"tr": 0.5}},  # a hazard to remove about every other generation
+    # Tiles and underground tokens.
+    "Underground Settlement": {"behavior": {"city": {}, "underworld": {"identify": {"count": 4, "claim": 1}}}},
+    "Central Reservoir": {"behavior": {"ocean": {}, "underworld": {"identify": {"count": 4, "claim": 2}}}},
+    "Tunneling Operation": {"behavior": {"underworld": {"identify": 1, "excavate": 2}}},
+    "Survey Mission": {"behavior": {"standardResource": 3}},  # three placement bonuses collected
+    "Boom Town": {"behavior": {"standardResource": 2}},  # the steel or titanium placement bonus under the city
+    "Mining Rights": {"behavior": {"tile": {}, "or": {"behaviors": [
+        {"production": {"steel": 1}, "stock": {"steel": 1}, "title": "steel"},
+        {"production": {"titanium": 1}, "stock": {"titanium": 1}, "title": "titanium"}]}}},
+    "Mining Rights:ares": {"behavior": {"tile": {}, "standardResource": 1, "or": {"behaviors": [
+        {"production": {"steel": 1}, "stock": {"steel": 1}, "title": "steel"},
+        {"production": {"titanium": 1}, "stock": {"titanium": 1}, "title": "titanium"}]}}},
+    "Landfill": lambda ctx: {"behavior": {"production": {"megacredits": sum(
+        1 for r in RESOURCES if (ctx.me.get(_PROD_KEY[r], 0) or 0) > 0) if ctx else 0}}},
+    "Project Eden": {"behavior": {"ocean": {}, "city": {}, "greenery": {}, "worth": {"discard 3 cards": -1.5}}},
+    "Old Mining Colony": {"behavior": {"worth": {"discard 1 card": -0.5}}},
+    "Mining Complex": {"behavior": {"tr": 2, "worth": {"mine and road tiles on The Moon": 2 * SPECIAL_TILE}}},
+    "Crew Training": {"behavior": {"planetaryTrack": 2}},
+    "Established Methods": lambda ctx: {"behavior": {"worth": {
+        "2 standard projects (best value − cost)": 2 * _standard_project_net(ctx) if ctx else 0.0}}},
+    "Executive Order": {"behavior": {"stock": {"megacredits": 10}}},
+    # Effects paying each generation (or each action) priced per generation.
+    "Aerotech": {"behavior": {"perGeneration": {"text": "titanium for the 2 cards not bought",
+                                                "behavior": {"stock": {"titanium": 4 - deck.CARDS_PLAYED_PER_GEN}}}}},
+    "Pristar": {"behavior": {"perGeneration": {"text": "no TR this generation (assumed 1 in 3): preservation + 6 M€",
+                                               "share": 1 / 3, "phase": True,
+                                               "behavior": {"stock": {"megacredits": 6}, "addResources": 1}}}},
+    "SolBank": {"behavior": {"perGeneration": {"text": "data for each payment (cards played + 1), 1 M€ each",
+                                               "phase": True,
+                                               "behavior": {"stock": {"megacredits": deck.CARDS_PLAYED_PER_GEN + 1}}}}},
+    "Mars Maths": {"behavior": {"perGeneration": {"text": "a 5th research card (half a card kept)",
+                                                  "behavior": {"drawCard": 0.5}}}},
+    # Actions the app runs in custom code.
+    "AstroDrill": {"action": {"or": {"behaviors": [
+        {"spend": {"resourcesHere": 1}, "stock": {"titanium": 3}, "title": "3 titanium"},
+        {"standardResource": 1, "title": "a standard resource"}]}}},
+    "Aeron Genomics": {"action": {"addResourcesToAnyCard": {"type": "Animal", "count": 1}}},  # a claimed token a gen
+    "Arcadian Communities": {"action": {"stock": {"megacredits": 2}}},  # 3 M€ for most community spaces you build on
+    # The energy production step once (it needs no energy left), then 3 M€ for a building card.
+    "Factorum": {"behavior": {"production": {"steel": 1, "energy": 1}}, "action": {"spend": {"megacredits": 3}, "drawCard": 1}},
+    "Gagarin Mobile Base": {"firstAction": {"standardResource": 1}, "action": {"standardResource": 1}},
+    "Junk Ventures": {"action": {"drawCard": {"count": 3, "keep": 1}}},
+    "Keplertec": {"action": {"spend": {"titanium": 1}, "underworld": {"identify": {"count": 4, "claim": 1}}}},
+    "Nanotech Industries": {"action": {"addResources": 1}},
+    "Odyssey": {"action": {"stock": {"megacredits": 2}}},     # replays a cheap event: its value over its cost
+    "Playwrights": {"action": {"stock": {"megacredits": 2}}},  # the same, from any player's events
+    "Project Workshop": {"action": {"spend": {"megacredits": 3}, "drawCard": 1}},
+    # Each use raises a different lowest production (the one worth most first, then the next): priced as an even
+    # mix of the five non-M€ productions.
+    "Robinson Industries": {"action": {"spend": {"megacredits": 4}, "production": {
+        r: 0.2 for r in ("steel", "titanium", "plants", "energy", "heat")}}},
+    "Tycho Magnetics": {"action": {"spend": {"energy": 1}, "drawCard": 1}},
+    "United Nations Mars Initiative": {"action": {"spend": {"megacredits": 3}, "tr": 1}},
+    "Viron": {"action": {"stock": {"megacredits": 2}}},  # a second use of your best action, once you have one
+    "Septem Tribus": {"action": {"stock": {"megacredits": 4}}},  # delegates in about 2 parties
+    "Main Belt Asteroids": {"action": {"addResources": 1, "stock": {"titanium": 1}}},
+    # An asteroid per space tag, spent as 1 M€ on the aquifer and asteroid standard projects.
+    "Kuiper Cooperative": {"action": {"stock": {"megacredits": {"tag": "space"}}}},
+    # A floater here is 2 heat.
+    "Stormcraft Incorporated": {"action": {"or": {"behaviors": [
+        {"addResourcesToAnyCard": {"type": "Floater", "count": 1}, "title": "a floater on another card"},
+        {"stock": {"heat": 2}, "title": "a floater here (2 heat)"}]}}},
+    "Floating Trade Hub": {"action": {"standardResource": 1}},  # 2 floaters here one generation, spent the next
+    # A weak card swapped for a new one, about every other generation (when you hold one you will not play).
+    "Focused Organization": {"action": {"worth": {"swap a weak card for a new one": (CARD - 0.5) / 2}}},
+    "The Darkside of The Moon Syndicate": _darkside,
+    # One-off firsts and passive effects.
+    "Anubis Securities": {"firstAction": {"earlyPlay": 1}},
+    "Inventrix": {"behavior": {"earlyPlay": 2}},
+    "Vitor": {"firstAction": {"worth": {"an award funded free": 8}}},
+    "Intragen Sanctuary Headquarters": {"firstAction": {"tr": 1, "tile": {}}},
+    "Nirgal Enterprises": {"behavior": {"worth": {"a milestone and an award at no cost": 8 + 8}}},
+    "Soylent Seedling Systems": {"behavior": {"stock": {"megacredits": 10}}},  # 2 seeds at 5 M€ on a greenery
+    "Ecoline": {},  # greeneries for 7 plants: its exported greeneryDiscount
+    "Polyphemos": {"behavior": {"cardBuyCost": 5}},
+    "TerraLabs Research": {"behavior": {"cardBuyCost": 1}},
+    "Beginner Corporation": {"behavior": {"freeHand": 10}},
+    "Agricola Inc": lambda ctx: {"behavior": {"worth": {"VP per tag type at game end": _agricola(ctx) if ctx else 0}}},
+    # The custom code only collects the printed payment (startingMC, already priced) or checks it can be paid.
+    "Business Empire": {}, "Galilean Mining": {}, "Huge Asteroid": {}, "Aquifer Turbines": {},
+    "Strategic Base Planning": {},
+    # Priced elsewhere: Helion's heat as M€ (_value_card), wild tags (counted as tags), and the rest by triggers.
+    "Helion": {}, "Chimera": {}, "Research Network": {},
+    # Their actions spend what their triggers (OWN_TRIGGERS) collect, priced there; Ambient's 8 heat for 1 TR is the
+    # heat rate after temperature is maxed (Outlook.ambient).
+    "Collegium Copernicus": {}, "Mind Set Mars": {}, "The Archaic Foundation Institute": {}, "Ambient": {},
+    "Lakefront Resorts": {}, "Sagitta Frontier Services": {"behavior": {"drawCard": 1}},
+    "Tharsis Republic": {},  # its custom play only adds solo mode's neutral cities
+}
+CUSTOM_BEHAVIORS.update(SETUP_BEHAVIORS)
+
+# Corporations and preludes left unpriced on purpose, with why. tests/test_setup_coverage.py fails when a card with
+# custom code is in neither a model nor this list.
+NOT_MODELLED = {
+    "Kingdom of Tauraro": "its custom part gives every opponent 2 M€ production: rival gains are not priced",
+    "Mons Insurance": "its custom part cuts opponents' production and pays victims of attacks: rival effects are not priced",
+    "Recession": "its custom part takes M€ and production from opponents: rival losses are not priced",
+    "Luna First Incorporated": "pays per Moon rate step: Moon rates are not simulated",
+    "Luna Trade Federation": "titanium production per Moon mine and titanium as 2 M€: Moon tiles are not simulated",
+    "The Grand Luna Capital Group": "pays per adjacent Moon habitat: Moon placement is not simulated",
+    "Tempest Consultancy": "delegates and chairman TR: Turmoil is not simulated",
+    "By-Election": "sets the ruling party and gives influence: Turmoil is not simulated",
+    "The New Space Race": "first player and the first ruling policy: Turmoil and turn order are not simulated",
+    "Incite": "influence and cheaper lobbying: Turmoil is not simulated",
+    "Corridors of Power": "draws a card when you become party leader: Turmoil is not simulated",
+    "Election Sponsorship": "influence: Turmoil is not simulated",
+    "Co-leadership": "draws CEO cards: CEO cards are not in the card data",
+    "Delta Project": "the Delta Project track is not in the card data",
+    "Athena": "hazard immunity and hazard tiles: board placement is not simulated",
+    "Habitat Marte": "Mars tags count as science tags: tag counts are not remapped",
+    "World Government Advisor": "its action raises a parameter with no TR or bonus: it only changes the game's pace",
+}
+
+
+def _apply_setup_effects(beh, v, ctx, card_tags, card_name, scale, pre):
+    """Price the SETUP_BEHAVIORS keys of one Behavior dict into v (see _apply)."""
+    if "perGeneration" in beh:
+        pg = beh["perGeneration"]
+        times = (ctx.phases if pg.get("phase") else ctx.gens_left) * pg.get("share", 1.0)
+        trial = Valuation(card_name)
+        _apply(pg["behavior"], trial, ctx, card_tags, card_name)
+        v.add(f"{pre}{pg.get('text', 'each generation')} ×{times:.1f}", trial.value * times * scale)
+    for label, amount in (beh.get("worth") or {}).items():
+        v.add(pre + label, amount * scale)
+    if beh.get("earlyPlay"):
+        v.add(f"{pre}plays {beh['earlyPlay']:g} requirement card(s) a generation early", beh["earlyPlay"] * EARLY_PLAY * scale)
+    if beh.get("extraSetup"):
+        ex = beh["extraSetup"]
+        worth, text = extra_setup_card(ctx, ex["kind"], ex["draw"], ex.get("cost", 0), ex.get("optional", False))
+        v.add(pre + text, worth * scale)
+    if beh.get("tradeAll"):
+        worth, text = trade_all_value(ctx, beh["tradeAll"])
+        v.add(f"{pre}trades with every colony, tracks +{beh['tradeAll']} ({text})", worth * scale)
+    if beh.get("colonyTracks"):
+        worth, text = colony_track_value(ctx, beh["colonyTracks"])
+        v.add(f"{pre}colony tracks +{beh['colonyTracks']} ({text})", worth * scale)
+    if beh.get("tradeFree"):
+        worth = free_trade_value(ctx) * beh["tradeFree"]
+        v.add(f"{pre}a free trade" + ("" if worth else " (no colony tiles)"), worth * scale)
+    if beh.get("playFromHand"):
+        worth, text, _ = play_from_hand(ctx, beh["playFromHand"])
+        v.add(f"{pre}{text}", worth * scale)
+        v.simulated += worth * scale
+    if beh.get("cardBuyCost"):
+        n = _cards_bought(ctx)
+        worth = (BUY_COST - beh["cardBuyCost"]) * n
+        v.add(f"{pre}cards cost {beh['cardBuyCost']} M€ to buy ×{n:.0f}", worth * scale)
+        v.simulated += worth * scale
+    if beh.get("freeHand"):
+        # The opening hand you would buy (about half the cards dealt) is free, and the rest come along.
+        n = beh["freeHand"]
+        worth = n / 2 * BUY_COST + n / 2 * 0.5
+        v.add(f"{pre}{n} starting cards free", worth * scale)
+        v.simulated += worth * scale
 
 
 # --------------------------------------------------------------------------------------------- underworld
@@ -1511,7 +1903,8 @@ OWN_TRIGGERS = {
     "Terraforming Deal": [("tr", [("mc", 2)], "+2 M€ per TR")],
     "United Nations Mission One": [("tr", [("mc", 1)], "+1 M€ per TR")],
     "Arctic Algae": [("ocean", [("plants", 2)], "+2 plants per ocean")],
-    "Lakefront Resorts": [("ocean", [("prod:megacredits", 1)], "+1 M€ production per ocean")],
+    "Lakefront Resorts": [("ocean", [("prod:megacredits", 1)], "+1 M€ production per ocean"),
+                          ("tile", [("mc", 0.7)], "+1 M€ ocean adjacency per tile (about 0.7 oceans next to it)")],
     "Polaris": [("ocean", [("prod:megacredits", 1), ("mc", 4)], "+1 M€ production and 4 M€ per ocean")],
     "PolderTECH Dutch": [("ocean", [("energy", 1)], "+1 energy per ocean"), ("greenery", [("plants", 1)], "+1 plant per greenery")],
     "Herbivores": [("greenery", [("here", 1)], "+1 animal per greenery")],
@@ -1553,9 +1946,90 @@ OWN_TRIGGERS = {
 }
 # Effects that also pay when a rival does it (rivals draw from the same deck: each plays about as many matching
 # cards as you do).
-RIVAL_TRIGGERS = {"Saturn Systems": "tag:jovian"}
+
+
+def _per_trade(n):
+    """An amount worth 1/n of a free trade at your best colony tile (a resource that trades when n are spent)."""
+    return lambda ctx: free_trade_value(ctx) / n
+
+
+_CITY_ON_MARS = CITY_TILE + 2.0  # Mind Set Mars: a city tile with its placement bonus (about a standard resource)
+_PLANET_TAGS = ("earth", "mars", "venus", "moon", "jovian")
+# Corporations and preludes whose custom code is an effect fired by later plays. An amount may be a function of the
+# Outlook. The assumptions are spelled out in each text.
+OWN_TRIGGERS.update({
+    "Splice": [("tag:microbe", [("mc", 4)], "+2 M€ to you and 2 M€ to the player per microbe tag")],
+    # Each microbe tag adds a disease (−4 M€); each of your science tags removes one for 1 TR.
+    "Pharmacy Union": [("tag:science", [("tr", 1)], "+1 TR per science tag (a disease removed)"),
+                       ("tag:microbe", [("mc", -4)], "−4 M€ per microbe tag (a disease added)")],
+    "Ringcom": [("card:jovian", [("titanium", 1)], "+1 titanium per Jovian card")],
+    "Recyclon": [("tag:building", [("prod:plants", 0.5)], "+1 microbe per building tag (2 = 1 plant production)")],
+    "Hecate Speditions": [(f"tag:{t}", [("mc", _per_trade(2))], f"+1 supply chain per {t} tag (2 = a trade)")
+                          for t in _PLANET_TAGS],
+    "Collegium Copernicus": [("tag:science", [("mc", _per_trade(3))], "+1 data per science tag (3 = a trade)")],
+    "Demetron Labs": [("tag:science", [("mc", lambda ctx: 2 / 3 * best_of_value(ctx, 3))],
+                       "+2 data per science tag (3 = claim the best of 3 tokens)")],
+    "Vitor": [("vpcard", [("mc", 3)], "+3 M€ per card with a VP icon")],
+    "Spire": [("multitag", [("mc", 2)], "+1 science (2 M€ on standard projects) per card with 2+ tags")],
+    "Adhai High Orbit Constructions": [("orbital", [("mc", _orbital_value)],
+                                        "+1 orbital per space card without a planet tag (2 = 1 M€ off)")],
+    "Arborist Collective": [("cheapevent", [("prod:plants", 0.5), ("plants", 1)],
+                             "+1 activist per event of 14 M€ or less (2 = 1 plant production and 2 plants)")],
+    "The Archaic Foundation Institute": [("tag:moon", [("tr", 1 / 3)], "+1 cube per Moon tag (3 = 1 TR)")],
+    "Intragen Sanctuary Headquarters": [("tag:animal", [("here", 1)], "+1 animal per animal tag")],
+    "Mind Set Mars": [("tag:building", [("mc", _CITY_ON_MARS / 5)], "+1 agenda per building tag (5 = a city)")],
+    "Curiosity II": [("tile", [("mc", (CARD - 2) / 2)], "pay 2 M€ for a card on about half your tiles")],
+    "Mining Guild": [("tile", [("prod:steel", 0.25)], "+1 steel production on steel/titanium bonus spaces (~1 in 4)")],
+    "Philares": [("tile", [("mc", 1.0)], "~½ new adjacency with a rival tile per tile: a standard resource")],
+    "Soylent Seedling Systems": [("greenery", [("mc", 5)], "+1 seed (5 M€ on a greenery or plant card) per greenery")],
+    "Poseidon": [("colony", [("prod:megacredits", 1)], "+1 M€ production per colony")],
+    "Colony Trade Hub": [("colony", [("mc", 2)], "+2 M€ per colony")],
+    "Aurorai": [("tr", [("mc", 2)], "+1 data per TR (3 M€ on standard projects; about 2 spent)")],
+    "Anubis Securities": [("tr", [("mc", 1)], "+2 M€ per TR while you have the least corruption (about half the time)")],
+    "Voltagon": [("token", [("energy", 2)], "+2 energy per underground token claimed")],
+    "Deepwater Dome": [("token", [("mc", 1)], "+2 M€ per excavation next to an ocean (about half of them)")],
+    "Manutech": [("prodmc", [("mc", 1)], "gains the resources of each production step")],
+    "Suitable Infrastructure": [("prodcard", [("mc", 2)], "+2 M€ per action that raises production")],
+    "Crescent Research Association": [("tag:moon", [("mc", 2)], "1 M€ off per Moon tag you have, per Moon tag")],
+    "Mars Direct": [("tag:mars", [("mc", lambda ctx: 1 + deck.future_matches(ctx, "tag:mars") / 2)],
+                     "1 M€ off per Mars tag you have, per Mars tag")],
+})
+# Effects that also pay when a rival does it: {card: [(event, payouts)]}. Rivals draw from the same deck, so each
+# plays about as many matching cards as you do; global parameters are shared: rivals raise their share of the steps
+# left.
+RIVAL_TRIGGERS = {
+    "Saturn Systems": [("tag:jovian", [("prod:megacredits", 1)])],
+    "Splice": [("tag:microbe", [("mc", 2)])],
+    "Pharmacy Union": [("tag:microbe", [("mc", -4)])],
+    "Ringcom": [("card:jovian", [("titanium", 1)])],
+    "Intragen Sanctuary Headquarters": [("tag:animal", [("here", 1)])],
+    "Philares": [("tile", [("mc", 0.5)])],
+    "Poseidon": [("colony", [("prod:megacredits", 1)])],
+    "Colony Trade Hub": [("colony", [("mc", 2)])],
+    "Lakefront Resorts": [("ocean", [("prod:megacredits", 1)])],
+    "Polaris": [("ocean", [("prod:megacredits", 1)])],
+    "Tharsis Republic": [("city", [("prod:megacredits", 1)])],
+    "Steelaris": [("city", [("steel", 1), ("plants", 1)])],
+    "Aphrodite": [("venus", [("mc", 2)])],
+}
 _TAG_TYPES_SKIP = ("event", "wild", "clone")
 OWN_TRIGGERS["Ecological Zone:ares"] = OWN_TRIGGERS["Ecological Zone"]
+
+
+def _amount(amt, ctx):
+    return amt(ctx) if callable(amt) else amt
+
+
+def rival_matches(ctx, event):
+    """Expected times rivals fire `event` over the rest of the game: their share of the global steps left, or what
+    their draws bring (as many as yours each)."""
+    rivals = len(ctx.players) - 1
+    param = {"ocean": "oceans", "temperature": "temperature", "oxygen": "oxygen", "venus": "venus"}.get(event)
+    if param:
+        left = ctx.left[param] if param != "venus" or ctx.venus_counts else \
+            min(ctx.left["venus"], UNCOUNTED_VENUS_RATE * ctx.gens_left)
+        return left * rivals / len(ctx.players)
+    return rivals * future_matches(ctx, event)
 
 _NO_CARD_TRIGGERS = ("Convert Plants", "Convert Heat")
 
@@ -1572,9 +2046,20 @@ def _trigger_counts(v, ctx, sim):
         "ocean": sim.tiles["ocean"], "greenery": sim.tiles["greenery"], "city": sim.tiles["city"],
         "tr": max(0.0, v.tr), "standard_project": 1 if standard else 0,
         "cost20": 1 if (project or standard) and (base or 0) >= 20 else 0,
+        "colony": v.colonies, "token": v.tokens,
+        "tile": sim.tiles["ocean"] + sim.tiles["greenery"] + sim.tiles["city"] + v.tiles["other"],
+        "prodmc": sum(n * deck.PRODUCTION_UNIT.get(r, 1.0) for r, n in v.prod.items()
+                      if isinstance(n, (int, float)) and n > 0),
     }
-    if project:
+    counts["prodcard"] = 1 if counts["prodmc"] else 0
+    if project or info.get("type") == "prelude":
+        # A prelude's tags count when it is played, as a project card's do.
+        vp = (data.behavior(v.name) or {}).get("vp")
         counts.update({
+            "vpcard": 1 if vp is not None and not (isinstance(vp, (int, float)) and vp < 0) else 0,
+            "multitag": 1 if len(tags) + (info.get("type") == "event") >= 2 else 0,
+            "orbital": 1 if "space" in tags and not set(tags) & deck.PLANETARY_TAGS else 0,
+            "cheapevent": 1 if info.get("type") == "event" and (info.get("cost") or 0) <= 14 else 0,
             "event": 1 if info.get("type") == "event" else 0,
             "space_event": 1 if info.get("type") == "event" and "space" in tags else 0,
             "notags": 1 if not tags else 0, "onetag": 1 if len(tags) == 1 else 0,
@@ -1596,6 +2081,8 @@ def _payout(kind, n, owner, ctx):
         return n * _unit(res, ctx) * (ctx.plant_phases if res == "plants" else ctx.phases)
     if kind == "card":
         return n * CARD
+    if kind == "tr":
+        return n * ctx.tr
     if kind == "here":
         return n * _resource_vp_value(owner, ctx)
     if kind.startswith("res:"):
@@ -1620,7 +2107,8 @@ def _own_triggers(v, ctx, sim):
         for event, pays, text in OWN_TRIGGERS.get(owner, []):
             n = counts.get(event, 0)
             if n:
-                v.add(f"your {owner}: {text} (×{n:g})", sum(_payout(k, amt * n, owner, ctx) for k, amt in pays))
+                v.add(f"your {owner}: {text} (×{n:g})",
+                      sum(_payout(k, _amount(amt, ctx) * n, owner, ctx) for k, amt in pays))
 
 
 _MILESTONE_METRICS = {
@@ -1806,7 +2294,7 @@ ORDER_SHARE = 0.5
 # Venus steps per generation when Venus does not count towards the game end (nobody needs to finish it).
 UNCOUNTED_VENUS_RATE = 1.0
 _PARAM_UNIT = {"temperature": 2, "oxygen": 1, "oceans": 1, "venus": 2}
-_SELF_TRIGGER = re.compile(r"including th(is|ese)", re.I)
+_SELF_TRIGGER = re.compile(r"(including|incl\.) th(is|ese)", re.I)
 
 
 def future_matches(ctx, event):
@@ -1850,6 +2338,8 @@ def _play_counts(name):
                    "venus": steps.get("venus", 0)})
     tr = beh.get("tr") if isinstance(beh.get("tr"), (int, float)) else 0
     counts["tr"] = tr + oceans + counts["temperature"] + counts["oxygen"] + counts["venus"]
+    for event in ("multitag", "orbital", "cheapevent", "tile", "colony", "prodmc", "prodcard", "vpcard", "token"):
+        counts[event] = deck._per_card(info, event, name)
     return {k: n for k, n in counts.items() if n}
 
 
@@ -1989,6 +2479,8 @@ def _self_counts(v):
         for t in set(v.persistent_tags):
             counts[f"tag:{t}"] = v.persistent_tags.count(t)
         counts["tag:bio"] = sum(v.persistent_tags.count(t) for t in ("plant", "animal", "microbe"))
+        counts["multitag"] = 1 if len(v.persistent_tags) >= 2 else 0
+        counts["orbital"] = 1 if "space" in v.persistent_tags and not set(v.persistent_tags) & deck.PLANETARY_TAGS else 0
     return counts
 
 
@@ -2015,16 +2507,17 @@ def _plan(v, ctx, nested=False):
                 items.append((self_counts[event], 0.0))
                 own += self_counts[event]
             hand += sum(n for n, _ in items)
-            amount += sum(_plan_payout(k, amt * n, v.name, ctx, delay) for n, delay in items for k, amt in pays)
+            amount += sum(_plan_payout(k, _amount(amt, ctx) * n, v.name, ctx, delay) for n, delay in items
+                          for k, amt in pays)
         label = f"effect ×{hand:.1f}" + (f" (incl. {own:g} own)" if own else "") if hand else "effect: no planned matches"
         v.add_combo(label, amount, keep=True)
 
-    if v.name in RIVAL_TRIGGERS and not owned:
-        event = RIVAL_TRIGGERS[v.name]
-        n = (len(ctx.players) - 1) * future_matches(ctx, event)
-        pays = OWN_TRIGGERS[v.name][0][1]
-        v.add_combo(f"rivals' {event[4:]} tags ×{n:.1f}",
-                    sum(_plan_payout(k, amt * n, v.name, ctx, ctx.gens_left / 2) for k, amt in pays))
+    for event, pays in (RIVAL_TRIGGERS.get(v.name, []) if not owned else []):
+        n = rival_matches(ctx, event)
+        what = f"{event[4:]} tags" if event.startswith("tag:") else f"{event[5:]} cards" if event.startswith("card:") \
+            else event + ("s" if event in ("ocean", "city", "tile", "colony") else " steps")
+        v.add_combo(f"rivals' {what} ×{n:.1f}",
+                    sum(_plan_payout(k, _amount(amt, ctx) * n, v.name, ctx, ctx.gens_left / 2) for k, amt in pays))
     if v.name == "Aridor" and not owned:
         _aridor(v, ctx, plan)
 
@@ -2049,7 +2542,8 @@ def _plan(v, ctx, nested=False):
         if not pc.get("tableau"):
             for event, pays, _ in OWN_TRIGGERS.get(pc["name"], []):
                 n = counts.get(event, 0)
-                got += sum(_plan_payout(k, amt * n, pc["name"], ctx, pc["wait"]) for k, amt in pays) * pc["p"] * ORDER_SHARE
+                got += sum(_plan_payout(k, _amount(amt, ctx) * n, pc["name"], ctx, pc["wait"]) for k, amt in pays) * \
+                    pc["p"] * ORDER_SHARE
             d_beh = (data.behavior(pc["name"]) or {}).get("cardDiscount")
             for d in (d_beh if isinstance(d_beh, list) else [d_beh] if d_beh else []):
                 got += d.get("amount", 0) * counts.get(_discount_event(d), 0) * pc["p"] * ORDER_SHARE
