@@ -2,9 +2,11 @@
 'Massive Optics Charge' (3 players, Utopia Planitia). Run: python3 -m unittest discover tests"""
 import unittest
 
-import types
+import contextlib
+import io
+from unittest import mock
 
-from tfm import data, options, plan, score, value
+from tfm import cli, data, options, plan, score, value
 from test_plan import first_gen, game
 from test_value import award, view
 
@@ -378,6 +380,95 @@ class Overvalued(unittest.TestCase):
     def test_boom_town_titanium_at_two(self):
         val = value.value_card("Boom Town", value.Outlook(view(), gens_left=4))
         self.assertIn(("+2 titanium prod × 3", 2 * 2 * 3), val.parts)
+
+
+def cli_view(waiting_for, **game):
+    v = rival_view()
+    v["game"].update(name="T", phase="action", gameAge=1, undoCount=0, colonies=[], passedPlayers=[], **game)
+    for p in v["players"]:
+        p.update(actionsThisGeneration=[], actionsTakenThisGame=0, fleetSize=1, tradesThisGeneration=0,
+                 timer={"running": False, "sumElapsed": 0, "startedAt": 0}, energy=0)
+    v["thisPlayer"] = v["players"][0]
+    v["waitingFor"] = waiting_for
+    return v
+
+
+def run_cli(argv, v, seat=None):
+    client = mock.Mock()
+    client.player.return_value = v
+    client.logs.return_value = []
+    client.submit.return_value = v
+    seat = seat if seat is not None else {"name": "x", "server": "s", "player_id": "p"}
+    out = io.StringIO()
+    with mock.patch.object(cli.seats, "load", return_value=seat), mock.patch.object(cli.seats, "save"), \
+            mock.patch.object(cli, "_client", return_value=client), contextlib.redirect_stdout(out):
+        cli.main(argv)
+    return out.getvalue(), seat
+
+
+MENU = {"type": "or", "title": "Take your first action", "options": [
+    {"type": "option", "title": "Convert 8 heat into temperature"}, {"type": "option", "title": "Pass for this generation"}]}
+
+
+class Cli(unittest.TestCase):
+    """15-20. CLI and option listing."""
+
+    def test_card_shows_colony_tiles(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main(["card", "Titania", "europa"])
+        self.assertIn("Titania [colony tile] — build: Gain 5, 3, or 2 VP; trade: Gain n VP", out.getvalue())
+        self.assertIn("Europa [colony tile] — build: Place an ocean tile", out.getvalue())
+
+    def test_colony_build_prompt_shows_the_build_bonus(self):
+        v = cli_view(None)
+        node = {"type": "colony", "title": "Select where to build a colony",
+                "coloniesModel": [{"name": "Titania", "colonies": [], "trackPosition": 1}]}
+        label = options.leaves(node, options.Context(v))[0].label
+        self.assertIn("build: Gain 5, 3, or 2 VP", label)
+        node["title"] = "Select colony to trade with"
+        self.assertNotIn("build:", options.leaves(node, options.Context(v))[0].label)
+
+    def test_heat_conversion_after_temperature_is_maxed(self):
+        v = cli_view(MENU, temperature=8)
+        labels_ = [lf.label for lf in options.leaves(MENU, options.Context(v))]
+        self.assertIn("temperature maxed: no TR", labels_[0])
+        v = cli_view(MENU, temperature=0)
+        self.assertNotIn("maxed", options.leaves(MENU, options.Context(v))[0].label)
+
+    def test_turn_prints_each_block_once(self):
+        text, _ = run_cli(["turn"], cli_view(MENU))
+        self.assertEqual(text.count("YOUR DECISION"), 1)
+        self.assertEqual(sum(1 for line in text.splitlines() if line.startswith("YOU:")), 1)
+        self.assertEqual(text.count("[1] Convert 8 heat"), 1)
+
+    def test_underground_tokens_are_explained(self):
+        v = cli_view(None)
+        v["game"]["spaces"] = [{"id": "11", "spaceType": "land", "undergroundResource": "plant2pertemp"}]
+        self.assertIn("this generation: +2 plants each time anyone raises the temperature",
+                      options.describe_space("11", options.Context(v)))
+        node = {"type": "claimedUndergroundToken", "title": "Claim", "min": 1, "max": 1,
+                "tokens": ["microbe2pertemp", "place6mc"]}
+        hint = options.needs(node, options.Context(v))
+        self.assertIn("0:microbe2pertemp (this generation: +2 microbes", hint)
+        self.assertIn("nothing when excavated", hint)
+
+    def test_hazard_space_bonus_is_not_paid(self):
+        v = cli_view(None)
+        v["game"]["spaces"] = [{"id": "11", "spaceType": "land", "bonus": [1], "tileType": 24}]
+        text = options.describe_space("11", options.Context(v))
+        self.assertIn("(NOT paid: the tile covers a hazard)", text)
+        v["game"]["spaces"] = [{"id": "11", "spaceType": "land", "bonus": [1]}]
+        self.assertNotIn("NOT paid", options.describe_space("11", options.Context(v)))
+
+    def test_play_without_expect_on_a_menu_prints_a_reminder(self):
+        v = cli_view(MENU)
+        _, seat = run_cli(["options"], v)
+        text, seat = run_cli(["play", "2"], v, seat)
+        self.assertIn("tip: add --expect TEXT", text)
+        _, seat = run_cli(["options"], v, seat)
+        text, _ = run_cli(["play", "2", "--expect", "Pass"], v, seat)
+        self.assertNotIn("tip:", text)
 
 
 class CurrentGeneration(unittest.TestCase):

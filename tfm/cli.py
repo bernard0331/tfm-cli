@@ -326,6 +326,8 @@ def cmd_play(args):
         _finish(seat, ctx)
         sys.exit(1)
     print(f"OK: [{leaf.id}] {leaf.label}" + (f" {args.values}" if args.values else ""))
+    if not args.expect and len(all_leaves) > 1:
+        print("  tip: add --expect TEXT (e.g. the card name) on menus: ids renumber when the game changes")
     if args.debug:
         print(json.dumps(response))
     new_view = _settled_view(client, new_view, ctx)
@@ -357,6 +359,14 @@ def _settled_view(client, view, ctx):
 def cmd_card(args):
     for name in args.names:
         info = data.card(name)
+        colony = next((k for k in data._load("colonies.json") if k.lower() == name.lower()), None)
+        if info is None and colony:
+            c = data.colony(colony)
+            qty = c.get("tradeQty")
+            print(f"{colony} [colony tile] — build: {c.get('build')}; trade: {c.get('trade')}"
+                  + (f" (n by track position: {', '.join(map(str, qty))})" if qty else "")
+                  + f"; colony bonus (to owners on each trade): {c.get('colonyBonus')}")
+            continue
         if info is None:
             hits = [n for n in data.cards() if name.lower() in n.lower()][:10]
             print(f"{name}: not found" + (f" (did you mean: {', '.join(hits)})" if hits else ""))

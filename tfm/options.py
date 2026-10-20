@@ -133,15 +133,16 @@ def _expand(node, ctx, ids, path, prefix, out, top=False):
             add(_join(label_prefix, ctx.names.get(color, color)), color, ids + [j + 1])
         return
     if t == "colony":
+        building = "trade" not in title.lower()
         for j, col in enumerate(node["coloniesModel"]):
-            add(_join(label_prefix, describe_colony(col, ctx)), col["name"], ids + [j + 1])
+            add(_join(label_prefix, describe_colony(col, ctx, building)), col["name"], ids + [j + 1])
         return
     if t == "resource":
         for j, res in enumerate(node["include"]):
             add(_join(label_prefix, res), res, ids + [j + 1])
         return
     if t == "option":
-        add(label_prefix)
+        add(label_prefix + _conversion_note(title, ctx))
         return
     if t == "and":
         combos = _and_combos(node, ctx)
@@ -235,7 +236,8 @@ def needs(node, ctx):
         return (f"VALUE = production steps totalling {pp['cost']}, e.g. megacredits={pp['cost']} "
                 f"(your production: {_units_str(prod)}; M€ production may drop to -5)")
     if t == "claimedUndergroundToken":
-        toks = ", ".join(f"{i}:{tk}" for i, tk in enumerate(node.get("tokens", [])))
+        toks = ", ".join(f"{i}:{tk}" + (f" ({TOKEN_TEXT[tk]})" if tk in TOKEN_TEXT else "")
+                         for i, tk in enumerate(node.get("tokens", [])))
         return f"VALUE = comma-separated token indexes ({node['min']}-{node['max']}): {toks}"
     if t == "aresGlobalParameters":
         return "VALUE = lowOceanDelta=0,highOceanDelta=0,temperatureDelta=0,oxygenDelta=0 (each -1..1)"
@@ -267,11 +269,14 @@ def describe_space(sid, ctx):
     parts = [f"space {sid}" + (f" [{space['a9']}]" if space.get("a9") else "")]
     if space.get("spaceType") not in (None, "land"):
         parts.append(space["spaceType"])
-    if space.get("bonus"):
-        parts.append("bonus " + ",".join(data.bonus_name(b) for b in space["bonus"]))
-    if space.get("undergroundResource"):
-        parts.append(f"underground {space['undergroundResource']}")
     steps = _hazard_steps(space)
+    if space.get("bonus"):
+        # A tile placed over a hazard covers an existing tile, and the app pays no placement bonus then.
+        parts.append("bonus " + ",".join(data.bonus_name(b) for b in space["bonus"]) +
+                     (" (NOT paid: the tile covers a hazard)" if steps else ""))
+    if space.get("undergroundResource"):
+        token = space["undergroundResource"]
+        parts.append(f"underground {token}" + (f" ({TOKEN_TEXT[token]})" if token in TOKEN_TEXT else ""))
     if steps:
         # Ares: a tile placed on a hazard pays 8 M€ per severity step and removes it for that many TR.
         parts.append(f"ON {data.tile_name(space['tileType'])}: costs {8 * steps} M€ extra, +{steps} TR")
@@ -296,6 +301,33 @@ def describe_space(sid, ctx):
     return " · ".join(parts)
 
 
+# Underground tokens whose effect is not obvious from the name (from the app's UnderworldExpansion).
+TOKEN_TEXT = {
+    "plant2pertemp": "this generation: +2 plants each time anyone raises the temperature",
+    "steel2pertemp": "this generation: +2 steel each time anyone raises the temperature",
+    "titanium1pertemp": "this generation: +1 titanium each time anyone raises the temperature",
+    "microbe2pertemp": "this generation: +2 microbes on a card each time anyone raises the temperature",
+    "mcprod1pertemp": "this generation: +1 M€ production each time anyone raises the temperature",
+    "place6mc": "6 M€ to whoever places a tile on this space; nothing when excavated",
+    "oceanrequirementmod": "your ocean requirements are 1 lower (temporary)",
+    "oxygenrequirementmod": "your oxygen requirements are 1 lower (temporary)",
+    "temprequirementmod": "your temperature requirements are 2 °C lower (temporary)",
+    "titaniumandplant": "1 titanium and 1 plant",
+    "steel2plant": "2 steel and 1 plant",
+}
+
+
+def _conversion_note(title, ctx):
+    """A warning on standard conversions that no longer raise a parameter."""
+    game = getattr(ctx, "game", None) or {}
+    low = title.lower()
+    if "heat into temperature" in low and game.get("temperature", -30) >= 8:
+        return "  ⟨temperature maxed: no TR — the heat is wasted⟩"
+    if "plants into greenery" in low and game.get("oxygenLevel", 0) >= 14:
+        return "  ⟨oxygen maxed: greenery 1 VP, no TR⟩"
+    return ""
+
+
 def _hazard_steps(space):
     if space.get("tileType") is None or space.get("color"):
         return 0
@@ -305,7 +337,7 @@ def _hazard_steps(space):
     return 2 if name.startswith("Severe") else 1
 
 
-def describe_colony(col, ctx):
+def describe_colony(col, ctx, build=False):
     info = data.colony(col["name"]) or {}
     qty = info.get("tradeQty")
     trade = info.get("trade", "")
@@ -313,7 +345,8 @@ def describe_colony(col, ctx):
     if isinstance(qty, list) and pos is not None and pos < len(qty):
         trade = re.sub(r"\bn\b", str(qty[pos]), trade)
     owners = ", ".join(ctx.names.get(c, c) for c in col.get("colonies", [])) or "none"
-    s = f"{col['name']} (trade: {trade}; colonies: {owners}; colony bonus: {info.get('colonyBonus', '?')}"
+    s = f"{col['name']} (" + (f"build: {info['build']}; " if build and info.get("build") else "") + \
+        f"trade: {trade}; colonies: {owners}; colony bonus: {info.get('colonyBonus', '?')}"
     if col.get("visitor"):
         s += f"; fleet there: {ctx.names.get(col['visitor'], col['visitor'])}"
     return s + ")"
