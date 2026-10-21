@@ -9,11 +9,17 @@ description = "Play Terraforming Mars (terraforming-mars.herokuapp.com) from the
 requires-python = ">=3.9"
 dependencies = []
 
+[project.optional-dependencies]
+# Discord voice chat (`tfm voice`). The core CLI stays standard-library only.
+voice = ["discord.py[voice]>=2.7.1", "discord-ext-voice-recv>=0.5.2a179"]
+# Offline speech-to-text instead of the OpenAI API.
+voice-local = ["tfm-cli[voice]", "faster-whisper>=1.1"]
+
 [project.scripts]
 tfm = "tfm.cli:main"
 
 [tool.setuptools]
-packages = ["tfm"]
+packages = ["tfm", "tfm.voice"]
 
 [tool.setuptools.package-data]
 tfm = ["data/*.json"]

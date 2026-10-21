@@ -6,7 +6,7 @@ server. Each decision costs one short text read (about 1k tokens) and one comman
 reloads and screenshots. Agents can only choose from the moves the app itself offers, so they can't
 make illegal moves.
 
-No dependencies: Python 3.9+ standard library only.
+No dependencies: Python 3.9+ standard library only. (Optional [Discord voice chat](#voice-chat-on-discord) adds a few.)
 
 ## Install
 
@@ -40,6 +40,100 @@ folder.
   and the agent reruns it with `--yes` after you agree. That relies on the agent following the
   instructions. For a hard guarantee, leave `tfm play` un-approved in the app's permission settings,
   so the app itself asks you before each move is sent.
+
+## Voice chat on Discord
+
+An agent can sit in your Discord voice channel while it plays: it hears what the table says (speech to
+text) and talks back (text to speech). A small background daemon (a Discord bot) does the audio;
+the agent only runs `tfm` commands. `tfm turn` shows what was said since the agent last looked, and
+returns early when someone says the seat's name, so the agent can answer even when it isn't its turn.
+
+### One-time setup
+
+1. **Create the bot.** In the [Discord Developer Portal](https://discord.com/developers/applications):
+   New Application → **Bot** → *Reset Token* and copy it. No privileged intents are needed.
+   Then **OAuth2 → URL Generator**: scope `bot`, permissions *View Channels*, *Connect*, *Speak*
+   (and *Send Messages* if you want `--text-chat`). Open the generated URL to add the bot to your server.
+   Use one bot (one token) per agent seat.
+2. **Install** (macOS, in the same venv as `tfm`):
+   ```bash
+   brew install opus
+   pip install -e ".[voice]"            # discord.py 2.7+ (with DAVE encryption) and voice receive
+   ```
+3. **Pick speech engines.** Speech to text: the OpenAI API (fast, accurate, a fraction of a cent per
+   line; set `OPENAI_API_KEY` or `--openai-key`) or offline with `pip install -e ".[voice-local]"`
+   (faster-whisper; slower on CPU, and may not have wheels for the newest Python yet). Text to speech: macOS `say` by
+   default (free; nicer voices under System Settings → Accessibility → Spoken Content → Manage Voices),
+   or `--tts openai`.
+4. **Configure the seat** (right-click the voice channel → *Copy Link*; you're prompted for the token):
+   ```bash
+   tfm -s claude voice config --channel https://discord.com/channels/<server>/<channel> --voice Zoe
+   tfm -s claude voice test --play      # speaks a line on your speakers, then transcribes it back
+   ```
+   The config is saved in `~/.tfm/voice/claude/` (token file is private to your user), so this is once
+   per seat, not per game.
+
+### Fast table talk (recommended)
+
+Answers through the playing agent take 5–60 s, since it only checks voice chat between its own game
+commands. With an Anthropic API key, the daemon answers by itself in about 2 s using a small fast model
+(`claude-haiku-5-5`; pay-as-you-go, a fraction of a cent per reply):
+
+```bash
+tfm -s claude voice config --anthropic-key sk-ant-...     # or set ANTHROPIC_API_KEY
+tfm -s claude voice ask "claude, who's winning?"         # try a reply here, without Discord
+```
+
+Each reply sees live game state, fetched from the server with the seat's link (the same summary as
+`tfm turn`), the agent's notes (`voice notes`, or `tfm play ... --note "..."`), and the last few minutes
+of chat, including whether the seat has passed this generation (so "are you done?" gets a straight
+answer). Thinking is turned off for these replies: it's what keeps them at about a second. It only talks: requests to make or undo a move, deals and real decisions are handed to the
+playing agent, which `tfm turn` wakes up for, after a short spoken "give me a sec".
+
+`--share private` (the default) keeps the hand and plans hidden: the hand, drafted cards and preludes are
+never sent to the model, so they can't slip out, and it deflects questions about plans. `--share open`
+sends everything, for open-hand or coaching games. `--responder off` turns auto-replies off.
+
+### Playing with voice
+
+Start voice before the game (or let the agent do it), and add a line to the agent's prompt:
+
+```bash
+tfm -s claude voice start
+```
+
+> Voice chat is on: read the "Voice chat" section of AGENT_INSTRUCTIONS.md.
+
+| Command | What it does |
+|---|---|
+| `tfm -s NAME voice start` / `stop` / `status` | Start the daemon and join the channel / leave / who's there, errors |
+| `tfm -s NAME voice say TEXT [--interrupt] [--text-chat] [--wait]` | Speak (queued; returns at once unless `--wait`) |
+| `tfm -s NAME voice listen [--wait S] [--last N]` | What people said since the last look (`turn`, `state` and `play` show it too) |
+| `tfm -s NAME voice notes [TEXT] [--append]` | Notes table talk answers from (`tfm play ... --note TEXT` sets them too) |
+| `tfm -s NAME voice ask TEXT [--show-context]` | Try a table-talk reply without Discord |
+| `tfm -s NAME voice config ...` | Token, channel, `--stt`/`--tts` engines, `--voice`, `--rate`, `--volume`, extra wake `--name`s, `--silence-ms`, `--responder`, `--share`, `--anthropic-key` |
+| `tfm -s NAME voice test [TEXT] [--play]` | Try the speech engines without Discord |
+
+Notes:
+
+- **Wake names**: the seat name plus common mishearings (for `claude`: cloud, clod, …), the bot's
+  display name, and any `--name` you add. For 20 seconds after the bot speaks, lines without the name
+  count as follow-ups, so a conversation doesn't need the name in every line (`followup_s` in the
+  seat's `config.json`). Table talk may stay quiet on a follow-up that isn't for it (talk to someone
+  else, a garbled fragment, a repeat), and while a reply to someone is still being written or waiting
+  to be spoken, their further follow-ups are only context, so one thought gets one answer. A line with
+  the name always gets an answer: if the model comes back empty it retries once, then hands the line
+  to the playing agent with a spoken "one sec". Bots saying the name don't wake the agent, so two agent
+  seats can't talk each other into a loop.
+- **Latency**: with table talk on, about 2 s after you stop talking (0.55 s pause detection,
+  transcription, the reply, then speech, which starts on the first sentence). Questions handed to the
+  playing agent take as long as it does: fastest while it waits in `tfm turn`.
+- **Encryption**: Discord requires end-to-end encrypted voice (DAVE) since March 2026. discord.py 2.7
+  handles it for speaking; for listening, `tfm` patches discord-ext-voice-recv with the decryption step
+  proposed upstream ([PR #58](https://github.com/imayhaveborkedit/discord-ext-voice-recv/pull/58)) until
+  the extension ships its own. If the bot speaks but never hears anyone, check `~/.tfm/voice/<seat>/bot.log`
+  and run `voice start --debug`.
+- The daemon runs on until `voice stop` (or the computer sleeps). Its log is `~/.tfm/voice/<seat>/bot.log`.
 
 ## Agent-only or test games on a local server
 
