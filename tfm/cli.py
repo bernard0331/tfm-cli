@@ -15,6 +15,7 @@ from pathlib import Path
 from . import data, digest, options, plan, score, seats, value
 from .client import DEFAULT_SERVER, Client, TfmError, create_game, parse_link
 from .text import card_line, message
+from .voice import cli as voice
 
 POLL_SECONDS = 3
 
@@ -181,6 +182,7 @@ def cmd_turn(args):
     seat = seats.load(args.seat)
     client = _client(seat)
     deadline = time.time() + args.wait
+    voice_paths = voice.active(seat["name"])
     view = client.player()
     while True:
         if view["game"]["phase"] == "end":
@@ -192,6 +194,7 @@ def cmd_turn(args):
             status = client.waiting_for(view["game"]["gameAge"], view["game"]["undoCount"])
             names = {p["color"]: p["name"] for p in view["players"]}
             who = ", ".join(names.get(c, c) for c in status.get("waitingFor", [])) or "nobody (between phases)"
+            voice.print_unread(seat["name"])
             print(f"STILL WAITING: not your turn yet (waiting on: {who}). Run `tfm turn` again.")
             return
         status = client.waiting_for(view["game"]["gameAge"], view["game"]["undoCount"])
@@ -199,13 +202,31 @@ def cmd_turn(args):
             view = client.player()
             if status["result"] == "GO":
                 continue
-        time.sleep(POLL_SECONDS)
+        if _sleep_unless_addressed(voice_paths, POLL_SECONDS):
+            voice.print_unread(seat["name"])
+            print("NOT YOUR TURN YET. Reply in voice if you want to, then run `tfm turn` again.")
+            return
+    voice.print_unread(seat["name"])
     _show(view, seat, client, args.full, with_values=args.value, snapshot=args.snapshot)
+
+
+def _sleep_unless_addressed(voice_paths, seconds):
+    """Sleep between polls, but wake up early (True) if someone in voice chat says this seat's name."""
+    if voice_paths is None:
+        time.sleep(seconds)
+        return False
+    end = time.time() + seconds
+    while time.time() < end:
+        if voice.addressed_pending(voice_paths):
+            return True
+        time.sleep(min(0.5, max(0.0, end - time.time())))
+    return voice.addressed_pending(voice_paths)
 
 
 def cmd_state(args):
     seat = seats.load(args.seat)
     client = _client(seat)
+    voice.print_unread(seat["name"])
     _show(client.player(), seat, client, args.full, with_values=args.value, snapshot=args.snapshot)
 
 
@@ -296,6 +317,8 @@ def _leaf_matches(leaf, text):
 
 def cmd_play(args):
     seat = seats.load(args.seat)
+    if args.note:
+        voice.set_notes(seat["name"], args.note)
     client = _client(seat)
     view = client.player()
     wf = view.get("waitingFor")
@@ -352,6 +375,7 @@ def cmd_play(args):
         seat.pop("fp", None)
         print("Your turn is done. Run `tfm turn` to wait for your next decision.")
     _finish(seat, ctx)
+    voice.print_unread(seat["name"], leading_blank=True, trailing_blank=False)
 
 
 def _settled_view(client, view, ctx):
@@ -478,6 +502,7 @@ def main(argv=None):
                    help="refuse unless the chosen option contains TEXT (e.g. the card name), guarding against renumbered ids")
     p.add_argument("--yes", action="store_true", help="confirm a move in confirm mode")
     p.add_argument("--debug", action="store_true", help="print the JSON sent to the server")
+    p.add_argument("--note", metavar="TEXT", help="voice chat: replace your table-talk notes (your plan and why)")
     p.set_defaults(fn=cmd_play)
 
     p = sub.add_parser("card", help="show card text")
@@ -494,6 +519,8 @@ def main(argv=None):
     p.add_argument("--server", default=DEFAULT_SERVER)
     p.add_argument("--players", help="comma-separated player names (overrides the settings file)")
     p.set_defaults(fn=cmd_new_game)
+
+    voice.add_parser(sub)
 
     args = parser.parse_args(argv)
     # A reader that stops early (`tfm play ... | head`) must not abort the command before the seat
@@ -518,7 +545,7 @@ def main(argv=None):
 
 def _transcript_path(args):
     """A seat can record everything tfm prints for it (set "transcript" in its seat file)."""
-    if args.cmd in ("join", "seats", "leave", "card", "new-game"):
+    if args.cmd in ("join", "seats", "leave", "card", "new-game", "voice"):
         return None
     try:
         return seats.load(args.seat).get("transcript")
