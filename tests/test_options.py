@@ -32,5 +32,22 @@ class DescribeSpace(unittest.TestCase):
         self.assertNotIn("ON ", text)
 
 
+class ClaimedUndergroundToken(unittest.TestCase):
+    NODE = {"type": "claimedUndergroundToken", "min": 1, "max": 1,
+            "tokens": [{"token": "plant2pertemp", "shelter": True, "active": False},
+                       {"token": "nothing", "shelter": False, "active": True}]}
+
+    def test_server_token_dicts_are_listed_by_index(self):
+        # Underground Shelters' action: the server sends ClaimedToken objects, not names.
+        text = options.needs(self.NODE, ctx([]))
+        self.assertIn("0:plant2pertemp (this generation: +2 plants", text)
+        self.assertIn("[shelter]", text)
+        self.assertIn("1:nothing [active]", text)
+
+    def test_bare_token_names_still_work(self):
+        text = options.needs(dict(self.NODE, tokens=["steel2plant"]), ctx([]))
+        self.assertIn("0:steel2plant (2 steel and 1 plant)", text)
+
+
 if __name__ == "__main__":
     unittest.main()

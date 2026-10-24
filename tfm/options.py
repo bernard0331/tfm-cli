@@ -236,9 +236,8 @@ def needs(node, ctx):
         return (f"VALUE = production steps totalling {pp['cost']}, e.g. megacredits={pp['cost']} "
                 f"(your production: {_units_str(prod)}; M€ production may drop to -5)")
     if t == "claimedUndergroundToken":
-        toks = ", ".join(f"{i}:{tk}" + (f" ({TOKEN_TEXT[tk]})" if tk in TOKEN_TEXT else "")
-                         for i, tk in enumerate(node.get("tokens", [])))
-        return f"VALUE = comma-separated token indexes ({node['min']}-{node['max']}): {toks}"
+        return f"VALUE = comma-separated token indexes ({node['min']}-{node['max']}): " + ", ".join(
+            f"{i}:{_claimed_token(tk)}" for i, tk in enumerate(node.get("tokens", [])))
     if t == "aresGlobalParameters":
         return "VALUE = lowOceanDelta=0,highOceanDelta=0,temperatureDelta=0,oxygenDelta=0 (each -1..1)"
     if t == "space":
@@ -315,6 +314,16 @@ TOKEN_TEXT = {
     "titaniumandplant": "1 titanium and 1 plant",
     "steel2plant": "2 steel and 1 plant",
 }
+
+
+def _claimed_token(tk):
+    """One claimed token as the server sends it ({token, shelter, active}; older servers send the bare name)."""
+    if not isinstance(tk, dict):
+        tk = {"token": tk}
+    name = tk.get("token", "?")
+    text = name + (f" ({TOKEN_TEXT[name]})" if name in TOKEN_TEXT else "")
+    flags = [f for f in ("shelter", "active") if tk.get(f)]
+    return text + (f" [{', '.join(flags)}]" if flags else "")
 
 
 def _conversion_note(title, ctx):
