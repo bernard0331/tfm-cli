@@ -12,7 +12,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import data, digest, options, plan, score, seats, value
+from . import archive, data, digest, options, plan, score, seats, value
 from .client import DEFAULT_SERVER, Client, TfmError, create_game, parse_link
 from .text import card_line, message
 from .voice import cli as voice
@@ -123,6 +123,7 @@ def _show(view, seat, client, full, with_state=True, with_values=False, snapshot
     if view["game"]["phase"] == "end":
         print("\n".join(digest.final_scores(view)))
         _finish(seat, ctx)
+        _archive_quietly(client, seat, view)
         return
     logs = _new_logs(client, seat, view)
     history = _record_awards(seat, view)
@@ -145,6 +146,32 @@ def _show(view, seat, client, full, with_state=True, with_values=False, snapshot
         print()
         _print_values(view)
     _finish(seat, ctx)
+
+
+def _archive_quietly(client, seat, view):
+    """Save a finished game the first time a seat sees it end. A failure here must never break play."""
+    try:
+        if archive.is_archived(view):
+            return
+        path, _ = archive.save(client, seat, view)
+        print(f"Archived this game to {path}")
+    except Exception as e:  # noqa: BLE001 - the final scores are already printed; only warn
+        print(f"WARNING: could not archive this game ({e}). Run `tfm archive` to retry.", file=sys.stderr)
+
+
+def cmd_archive(args):
+    if args.all:
+        results = archive.save_all()
+        if not results:
+            print("No saved seats to archive from.")
+        for name, game, outcome, detail in results:
+            print(f"{name}: {game}: {outcome}" + (f" ({detail})" if outcome in ("failed", "not finished") else f" -> {detail}"))
+        saved = len({detail for _, _, outcome, detail in results if outcome in ("archived", "updated")})
+        print(f"{saved} game file(s) in {archive.home()}")
+        return
+    seat = seats.load(args.seat)
+    path, created = archive.save(_client(seat), seat)
+    print(f"{'Archived' if created else 'Updated the archive of'} game '{seat.get('game')}' at {path}")
 
 
 def cmd_join(args):
@@ -514,6 +541,10 @@ def main(argv=None):
     p.add_argument("--generation", type=int)
     p.set_defaults(fn=cmd_log)
 
+    p = sub.add_parser("archive", help="save a finished game (final view and full log) to ~/.tfm/games")
+    p.add_argument("--all", action="store_true", help="backfill: try every saved seat's game")
+    p.set_defaults(fn=cmd_archive)
+
     p = sub.add_parser("new-game", help="create a game from a settings JSON and print player links")
     p.add_argument("settings")
     p.add_argument("--server", default=DEFAULT_SERVER)
@@ -545,7 +576,7 @@ def main(argv=None):
 
 def _transcript_path(args):
     """A seat can record everything tfm prints for it (set "transcript" in its seat file)."""
-    if args.cmd in ("join", "seats", "leave", "card", "new-game", "voice"):
+    if args.cmd in ("join", "seats", "leave", "card", "new-game", "voice", "archive"):
         return None
     try:
         return seats.load(args.seat).get("transcript")

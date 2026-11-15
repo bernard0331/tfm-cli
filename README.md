@@ -164,6 +164,7 @@ python3 tools/random_bot.py seat1 seat2 seat3
 | `tfm card NAME ...` | Card text from the bundled card data |
 | `tfm -s NAME value [CARD ...] [--gens N]` | Estimate what cards are worth in M€ now (default: the cards in your pending decision and hand), with context checks. `turn --value` / `state --value` append the same report |
 | `tfm seats` / `tfm leave NAME` | List / remove saved seats |
+| `tfm -s NAME archive` / `tfm archive --all` | Save a finished game to `~/.tfm/games` / try every saved seat's game (see [Archiving finished games](#archiving-finished-games)) |
 | `tfm new-game SETTINGS.json --server URL [--players a,b]` | Create a game and print player links |
 
 ### Safety checks
@@ -198,6 +199,36 @@ same way, so you can compare a card with the standard project it would replace.
 
 Generations left come from the table's recent terraforming pace, capped at a typical game length
 for the player count; override with `--gens`. The numbers are estimates for comparing options.
+
+## Archiving finished games
+
+The server deletes a finished game some days after it ends, and `tfm` otherwise keeps no history.
+An archive saves what a seat can see at the end, one file per game:
+
+```
+~/.tfm/games/<game-name>-<key>.json        (TFM_HOME overrides ~/.tfm)
+```
+
+- A seat archives its game automatically the first time `tfm turn` or `tfm state` shows GAME OVER.
+  If that fails, the final scores still print and a warning says to run `tfm archive`.
+- `tfm -s NAME archive` archives one seat's game by hand. It refuses a game that is still running.
+- `tfm archive --all` tries every saved seat: use it to backfill past games. A seat file only
+  remembers its latest game, so earlier games played under the same seat name cannot be recovered,
+  and neither can games the server has already deleted.
+- Archiving again is safe. Several seats in one game share the file: each adds its own view, and
+  log entries are merged without duplicates. A file that is not valid JSON is never overwritten.
+
+Only the seat's own player link is used. Player and spectator ids are replaced with `redacted`
+before anything is written, so an archive holds no game links.
+
+| Field | Contents |
+|---|---|
+| `format` | Archive format version (`1`) |
+| `game_key` | Stable id for the game, the same for every seat in it |
+| `game_name`, `server`, `generations` | Which game this is |
+| `first_archived_at`, `archived_at` | UTC times of the first and latest archive |
+| `views.<color>` | `seat`, `archived_at`, and `view`: that seat's final player view as the server returned it (settings, every player's corporation, played cards, tags and VP breakdown) |
+| `logs.<generation>` | The game log entries for that generation, oldest first |
 
 ## Updating card data
 
