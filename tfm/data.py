@@ -7,6 +7,41 @@ from pathlib import Path
 DATA_DIR = Path(__file__).resolve().parent / "data"
 
 
+# Global-parameter maximums. Amazonis Planitia has longer tracks (upstream src/common/constants.ts).
+STANDARD_MAX = {"temperature": 8, "oxygen": 14, "oceans": 9, "venus": 30}
+AMAZONIS_MAX = {"temperature": 14, "oxygen": 18, "oceans": 11, "venus": 33}
+PARAM_STEP = {"temperature": 2, "oxygen": 1, "oceans": 1, "venus": 2}
+
+
+def is_amazonis(game):
+    return str((game.get("gameOptions") or {}).get("boardName", "")).lower() == "amazonis planitia"
+
+
+def param_max(game):
+    """The four global parameters' maximums for this game's map."""
+    return AMAZONIS_MAX if is_amazonis(game) else STANDARD_MAX
+
+
+def steps_left(game):
+    """Raises left on each global parameter (a final partial Venus step still counts as one)."""
+    top = param_max(game)
+    now = {"temperature": game.get("temperature", -30), "oxygen": game.get("oxygenLevel", 0),
+           "oceans": game.get("oceans", 0), "venus": game.get("venusScaleLevel", 0) or 0}
+    return {p: max(0, -(-(top[p] - now[p]) // PARAM_STEP[p])) for p in top}
+
+
+def track_bonuses(game):
+    """Bonuses printed on the temperature, oxygen and Venus tracks: {param: [(threshold, bonus), ...]}
+    (upstream src/server/boards/GlobalParameterTracks.ts)."""
+    if is_amazonis(game):
+        return {"temperature": [(-24, "heatproduction"), (-20, "heatproduction"), (-12, "plantproduction"), (0, "ocean")],
+                "oxygen": [(7, "drawcard"), (11, "temperature")],
+                "venus": [(8, "drawcard"), (16, "colony"), (22, "tr")]}
+    return {"temperature": [(-24, "heatproduction"), (-20, "heatproduction"), (0, "ocean")],
+            "oxygen": [(8, "temperature")],
+            "venus": [(8, "drawcard"), (16, "tr")]}
+
+
 @lru_cache(maxsize=None)
 def _load(name):
     return json.loads((DATA_DIR / name).read_text(encoding="utf-8"))

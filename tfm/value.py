@@ -279,12 +279,11 @@ class Outlook:
         self.generation = g["generation"]
         self.temp, self.oxygen, self.oceans = g["temperature"], g["oxygenLevel"], g["oceans"]
         self.venus = g.get("venusScaleLevel", 0) or 0
-        self.left = {
-            "temperature": max(0, (8 - self.temp) // 2),
-            "oxygen": max(0, 14 - self.oxygen),
-            "oceans": max(0, 9 - self.oceans),
-            "venus": max(0, (30 - self.venus) // 2) if self.expansions.get("venus") else 0,
-        }
+        self.max = data.param_max(g)
+        self.track_bonuses = data.track_bonuses(g)
+        self.left = data.steps_left(g)
+        if not self.expansions.get("venus"):
+            self.left["venus"] = 0
         remaining = self.left["temperature"] + self.left["oxygen"] + self.left["oceans"] + \
             (self.left["venus"] if self.venus_counts else 0)
         self.pace = self._pace(g.get("globalsPerGeneration") or [])
@@ -855,11 +854,12 @@ def _later(ctx, g):
     c.tr = VP + c.phases
     c.plant_phases = c.gens_left
     c.left = {p: max(0, round(n - _param_rate(p, ctx) * g)) for p, n in ctx.left.items()}
-    c.temp = max(ctx.temp, 8 - 2 * c.left["temperature"])
-    c.oxygen = max(ctx.oxygen, 14 - c.left["oxygen"])
-    c.oceans = max(ctx.oceans, 9 - c.left["oceans"])
+    top = ctx.max
+    c.temp = max(ctx.temp, top["temperature"] - 2 * c.left["temperature"])
+    c.oxygen = max(ctx.oxygen, top["oxygen"] - c.left["oxygen"])
+    c.oceans = max(ctx.oceans, top["oceans"] - c.left["oceans"])
     if ctx.expansions.get("venus"):
-        c.venus = max(ctx.venus, 30 - 2 * c.left["venus"])
+        c.venus = max(ctx.venus, top["venus"] - 2 * c.left["venus"])
     c.heat = c.tr / 8 if c.left["temperature"] > 0 or ctx.ambient else 0.0
     c.plant = (VP + c.tr) / 8 if c.left["oxygen"] > 0 else VP / 8
     return c
@@ -1765,14 +1765,7 @@ class _Sim:
             self.steps["temperature"] += 1
             self._price(label, ctx.tr, tr=1)
             label = label and f"bonus temperature step{via}"
-            for t in (-24, -20):
-                if before < t <= self.temp:
-                    v.add(f"temperature reaches {t}°C: +1 heat production{via}", ctx.heat * ctx.phases)
-            if before < 0 <= self.temp:
-                if self.left["oceans"]:
-                    self.queue.append(("ocean", 1, f"temperature reaches 0°C: bonus ocean{via}", via))
-                else:
-                    v.flags.append(f"temperature reaches 0°C{via} but oceans are full: no bonus ocean")
+            self._track_bonuses("temperature", before, self.temp, f"temperature reaches {{}}°C", via)
             if not self.left["temperature"]:
                 self.last.append("temperature")
 
@@ -1784,11 +1777,7 @@ class _Sim:
             self.steps["oxygen"] += 1
             self._price(label, ctx.tr, tr=1)
             label = label and f"bonus oxygen step{via}"
-            if before < 8 <= self.oxygen:
-                if self.left["temperature"]:
-                    self.queue.append(("temperature", 1, "oxygen reaches 8%: bonus temperature step", " (via oxygen 8%)"))
-                else:
-                    v.flags.append("oxygen reaches 8% but temperature is maxed: no bonus")
+            self._track_bonuses("oxygen", before, self.oxygen, "oxygen reaches {}%", via)
             if not self.left["oxygen"]:
                 self.last.append("oxygen")
 
@@ -1823,14 +1812,41 @@ class _Sim:
                 if self.venus > 16:
                     v.add(f"alternative Venus board: resource reward{via}", 2.0)
             else:
-                if before < 8 <= self.venus:
-                    v.add(f"Venus reaches 8%: draw a card{via}", CARD)
-                if before < 16 <= self.venus:
-                    v.add(f"Venus reaches 16%: +1 TR{via}", ctx.tr)
-                    self.bonus_tr += 1
-                    v.tr += 1
+                self._track_bonuses("venus", before, self.venus, "Venus reaches {}%", via)
             if not self.left["venus"]:
                 self.last.append("venus")
+
+    def _track_bonuses(self, param, before, after, what, via):
+        """Price the bonuses printed on this map's `param` track between `before` (exclusive) and `after`."""
+        ctx, v = self.ctx, self.v
+        bonuses = getattr(ctx, "track_bonuses", None) or data.track_bonuses(ctx.game)
+        for t, bonus in bonuses.get(param, []):
+            if not before < t <= after:
+                continue
+            at = what.format(t)
+            if bonus == "heatproduction":
+                v.add(f"{at}: +1 heat production{via}", ctx.heat * ctx.phases)
+            elif bonus == "plantproduction":
+                v.add(f"{at}: +1 plant production{via}", ctx.plant * ctx.plant_phases)
+            elif bonus == "drawcard":
+                v.add(f"{at}: draw a card{via}", CARD)
+            elif bonus == "colony":
+                worth, _ = best_colony_build(ctx)
+                v.add(f"{at}: build a colony{via}", worth)
+            elif bonus == "tr":
+                v.add(f"{at}: +1 TR{via}", ctx.tr)
+                self.bonus_tr += 1
+                v.tr += 1
+            elif bonus == "ocean":
+                if self.left["oceans"]:
+                    self.queue.append(("ocean", 1, f"{at}: bonus ocean{via}", via))
+                else:
+                    v.flags.append(f"{at}{via} but oceans are full: no bonus ocean")
+            elif bonus == "temperature":
+                if self.left["temperature"]:
+                    self.queue.append(("temperature", 1, f"{at}: bonus temperature step", f" (via {param} {t}%)"))
+                else:
+                    v.flags.append(f"{at} but temperature is maxed: no bonus")
 
     # Planetary-track rewards that change the board go back into the queue instead of a flat price.
     _CHAIN_REWARDS = {"venus_scale": "venus", "ocean": "ocean", "greenery": "greenery", "city": "city"}

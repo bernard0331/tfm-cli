@@ -52,13 +52,14 @@ def clock(p, options):
 
 
 def globals_line(g):
+    top, left = data.param_max(g), data.steps_left(g)
     parts = [
-        f"temp {g['temperature']}°C/+8 ({max(0, (8 - g['temperature']) // 2)} steps left)",
-        f"O2 {g['oxygenLevel']}%/14 ({max(0, 14 - g['oxygenLevel'])} left)",
-        f"oceans {g['oceans']}/9 ({max(0, 9 - g['oceans'])} left)",
+        f"temp {g['temperature']}°C/+{top['temperature']} ({left['temperature']} steps left)",
+        f"O2 {g['oxygenLevel']}%/{top['oxygen']} ({left['oxygen']} left)",
+        f"oceans {g['oceans']}/{top['oceans']} ({left['oceans']} left)",
     ]
     if g["gameOptions"]["expansions"].get("venus"):
-        parts.append(f"Venus {g['venusScaleLevel']}%/30")
+        parts.append(f"Venus {g['venusScaleLevel']}%/{top['venus']}")
     return " · ".join(parts)
 
 

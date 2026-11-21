@@ -376,7 +376,7 @@ def cmd_play(args):
         print("Ask the human to approve; once they say yes, rerun the same command with --yes.")
         sys.exit(3)
     try:
-        new_view = client.submit(response, view.get("runId"))
+        new_view = client.submit(response, view.get("runId"), view.get("requestId"))
     except TfmError as e:
         print(f"REJECTED: {e}")
         _print_options(client.player(), ctx, seat)

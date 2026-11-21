@@ -65,10 +65,12 @@ class Client:
     def logs(self, generation=None):
         return self._request("api/game/logs", {} if generation is None else {"generation": generation})
 
-    def submit(self, response, run_id=None):
+    def submit(self, response, run_id=None, request_id=None):
         body = dict(response)
         if run_id is not None:
             body["runId"] = run_id
+        if request_id is not None:
+            body["requestId"] = request_id
         return self._request("player/input", body=body)
 
 

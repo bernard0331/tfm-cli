@@ -170,8 +170,8 @@ SP_POINTS = (("Asteroid", 14, "temperature", 1, 0), ("Aquifer", 18, "oceans", 1,
 
 
 def _steps_left(game):
-    return {"temperature": max(0, (8 - game["temperature"]) // 2), "oxygen": max(0, 14 - game["oxygenLevel"]),
-            "oceans": max(0, 9 - game["oceans"])}
+    left = data.steps_left(game)
+    return {p: left[p] for p in ("temperature", "oxygen", "oceans")}
 
 
 def _sp_rate(left):

@@ -54,8 +54,8 @@ CITY_VP = value.CITY_TILE / VP  # a city's greenery adjacency, flat (value.py pr
 OCEAN_ADJACENCY = value.OCEAN_ADJACENCY  # M€ from ocean adjacency on top of the ocean's TR
 PRELUDES_KEPT = 2          # standard Prelude rule: keep 2 of the 4 dealt
 RIVAL_VENUS_STEPS = 1.0    # Venus steps per generation from rivals when Venus does not count for game end
-MAX = {"temperature": 8, "oxygen": 14, "oceans": 9, "venus": 30}
-STEP = {"temperature": 2, "oxygen": 1, "oceans": 1, "venus": 2}
+MAX = data.STANDARD_MAX  # standard maps; the planner uses its game's own maximums (self.max)
+STEP = data.PARAM_STEP
 MIN = {"temperature": -30, "oxygen": 0, "oceans": 0, "venus": 0}
 STANDARD_PROJECTS = {"Power Plant:SP": 11, "Asteroid:SP": 14, "Aquifer": 18, "Greenery": 23, "City": 25,
                      "Air Scrapping": 15}
@@ -251,6 +251,7 @@ class _Planner:
         self.view = view
         base = value.Outlook(view, gens_left=gens)
         self.base = base
+        self.max = base.max
         self.gens = base.gens_left
         self.first_gen = base.generation
         self.n_players = len(base.players)
@@ -506,9 +507,9 @@ class _Planner:
         """Raise a global parameter by whole steps for you; returns the TR gained."""
         if param not in s.params or (param == "venus" and not self.venus_on):
             return 0
-        room = int(round((MAX[param] - _whole(param, s.params[param])) / STEP[param]))
+        room = math.ceil((self.max[param] - _whole(param, s.params[param])) / STEP[param] - 1e-9)
         done = max(0, min(int(steps), room))
-        s.params[param] = min(MAX[param], s.params[param] + done * STEP[param])
+        s.params[param] = min(self.max[param], s.params[param] + done * STEP[param])
         s.tr += done
         return done
 
@@ -582,7 +583,7 @@ class _Planner:
             s.plays.append((gen, "greenery (plants)"))
         helion = any(c["name"] == "Helion" for c in s.tableau)
         # Helion spends heat as M€: 8 heat go to a temperature step only while a TR is worth more than 8 M€.
-        while s.stock["heat"] >= 8 and s.params["temperature"] < MAX["temperature"] and \
+        while s.stock["heat"] >= 8 and s.params["temperature"] < self.max["temperature"] and \
                 not (helion and ctx is not None and ctx.tr <= 8):
             s.stock["heat"] -= 8
             self.raise_param(s, "temperature", 1)
@@ -603,15 +604,16 @@ class _Planner:
         the table (you included) keeps to the schedule that finishes terraforming in the projected generations:
         your own steps from drawn cards are banked as VP, not simulated, so rivals stand in for them."""
         params = ["temperature", "oxygen", "oceans"] + (["venus"] if self.venus_counts else [])
-        left = {p: max(0.0, (MAX[p] - s.params[p]) / STEP[p]) for p in params}
+        top = self.max
+        left = {p: max(0.0, (top[p] - s.params[p]) / STEP[p]) for p in params}
         total = sum(left.values())
         if total and self.n_players > 1:
             due = total - max(0.0, self.base.remaining_steps - (i + 1) * self.table_pace)
             steps = max(self.rival_pace, due)
             for p in params:
-                s.params[p] = min(MAX[p], s.params[p] + min(left[p], steps * left[p] / total) * STEP[p])
+                s.params[p] = min(top[p], s.params[p] + min(left[p], steps * left[p] / total) * STEP[p])
         if self.venus_on and not self.venus_counts:
-            s.params["venus"] = min(MAX["venus"], s.params["venus"] + RIVAL_VENUS_STEPS * STEP["venus"])
+            s.params["venus"] = min(top["venus"], s.params["venus"] + RIVAL_VENUS_STEPS * STEP["venus"])
 
     # ---- one generation
 
